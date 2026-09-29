@@ -34,7 +34,12 @@ func commandArgs(r *pb.ExecRequest) ([]string, error) {
 	if !safePath(wd) {
 		return nil, status.Error(codes.InvalidArgument, "workdir outside workspace")
 	}
-	args := []string{"/usr/bin/env", "-i", "--", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	defaultPath := "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	// The shell is only for setting cwd. Pass environment assignments as
+	// positional arguments to the final env invocation: some /bin/sh versions
+	// drop non-identifier keys (e.g. INPUT_FETCH-DEPTH) on startup.
+	args := []string{"/usr/bin/env", "-i", "--", defaultPath, "/bin/sh", "-c",
+		`mkdir -p -- "$1" && cd -- "$1" && shift && exec /usr/bin/env -i -- "$@"`, "forgejo", wd, defaultPath}
 	keys := make([]string, 0, len(r.GetEnv()))
 	for k := range r.GetEnv() {
 		keys = append(keys, k)
@@ -46,7 +51,6 @@ func commandArgs(r *pb.ExecRequest) ([]string, error) {
 		}
 		args = append(args, k+"="+r.GetEnv()[k])
 	}
-	args = append(args, "/bin/sh", "-c", `mkdir -p -- "$1" && cd -- "$1" && shift && exec "$@"`, "forgejo", wd)
 	args = append(args, r.GetCommand()...)
 	return args, nil
 }

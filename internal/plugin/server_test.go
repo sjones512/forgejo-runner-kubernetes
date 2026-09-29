@@ -131,7 +131,7 @@ func TestExecTranslation(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, "|")
-	if !strings.Contains(joined, "MY_VAR=a b; $(id)") || !strings.Contains(joined, "forgejo|/workspace/org/repo|sh|-e|script.sh") {
+	if !strings.Contains(joined, "MY_VAR=a b; $(id)") || !strings.Contains(joined, "forgejo|/workspace/org/repo|PATH=") || !strings.HasSuffix(joined, "|sh|-e|script.sh") {
 		t.Fatal(args)
 	}
 	if !safePath("/shared/act/") {
@@ -164,7 +164,7 @@ func TestExecTranslation(t *testing.T) {
 }
 
 func TestExecEnvironmentArgv(t *testing.T) {
-	r := &pb.ExecRequest{Command: []string{"node", "action.js"}, Workdir: "/workspace", Env: map[string]string{
+	r := &pb.ExecRequest{Command: []string{"/usr/bin/env"}, Workdir: "/workspace", Env: map[string]string{
 		"INPUT_FETCH-DEPTH": "0", "INPUT_NODE-VERSION-FILE": ".node-version", "A.B": "dot", "--help": "not an env option", "VALUE": "a=b",
 	}}
 	args, err := commandArgs(r)
@@ -174,14 +174,14 @@ func TestExecEnvironmentArgv(t *testing.T) {
 	if !slices.Equal(args[:3], []string{"/usr/bin/env", "-i", "--"}) {
 		t.Fatalf("env option boundary: %q", args[:3])
 	}
-	// Probe the same argv prefix through env -> sh -> env. Neither env's option
-	// parser nor sh may interpret the assignment names as shell identifiers.
-	end := slices.Index(args, "/bin/sh")
-	if end < 0 {
+	// Execute the constructed argv through both env calls and the cwd shell.
+	// Substitute only the workdir to avoid writing /workspace on the test host.
+	wd := slices.Index(args, "forgejo") + 1
+	if wd == 0 || wd >= len(args) {
 		t.Fatal(args)
 	}
-	probe := append(append([]string(nil), args[1:end]...), "/bin/sh", "-c", "/usr/bin/env")
-	out, err := exec.Command(args[0], probe...).Output()
+	args[wd] = t.TempDir()
+	out, err := exec.Command(args[0], args[1:]...).Output()
 	if err != nil {
 		t.Fatal(err)
 	}
