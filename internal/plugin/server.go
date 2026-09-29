@@ -34,8 +34,8 @@ const (
 	defaultEphemeralStorageLimit   = "2Gi"
 )
 
-// Config intentionally fixes the job image and namespace: workflow inputs cannot
-// widen either trust boundary in this first milestone.
+// Config fixes the job namespace and supplies the default job image. Runner
+// label arguments and explicit container.image may select another job image.
 type Config struct {
 	Namespace               string
 	Image                   string
@@ -145,15 +145,23 @@ func (s *Server) Capabilities(context.Context, *pb.CapabilitiesRequest) (*pb.Cap
 	return &pb.CapabilitiesResponse{Name: "kubernetes"}, nil
 }
 func (s *Server) Create(ctx context.Context, r *pb.CreateRequest) (*pb.CreateResponse, error) {
-	// v13.2 sends image="" when jobs.<id>.container is absent; the label
-	// suffix is the only image hint for a plain `run:` job. Reject overrides.
-	if strings.TrimSpace(r.GetName()) == "" || (r.GetImage() != "" && r.GetImage() != s.cfg.Image) || (r.GetImage() == "" && r.GetLabelArg() != s.cfg.Image) || len(r.GetServices()) != 0 || len(r.GetBackendOptions()) != 0 || (r.GetLabelArg() != "" && r.GetLabelArg() != s.cfg.Image) || len(r.GetCapAdd()) != 0 {
-		return nil, status.Error(codes.InvalidArgument, "name and configured image required; services, options, alternate label suffix and cap_add unsupported")
+	// Runner v13.2 sends image="" for jobs without container.image, leaving
+	// the plugin label suffix in label_arg. An explicit container.image takes
+	// precedence; the configured image is only the fallback for an empty label.
+	image := r.GetImage()
+	if image == "" {
+		image = r.GetLabelArg()
+	}
+	if image == "" {
+		image = s.cfg.Image
+	}
+	if strings.TrimSpace(r.GetName()) == "" || image != strings.TrimSpace(image) || strings.ContainsRune(image, 0) || len(r.GetServices()) != 0 || len(r.GetBackendOptions()) != 0 || len(r.GetCapAdd()) != 0 {
+		return nil, status.Error(codes.InvalidArgument, "name and valid image required; services, options and cap_add unsupported")
 	}
 	id := podName(r.GetName())
 	unlock := s.lock(id)
 	defer unlock()
-	obj := podSpec(id, r.GetName(), s.cfg)
+	obj := podSpec(id, r.GetName(), image, s.cfg)
 	if r.GetEnvironmentTimeout() != nil && r.GetEnvironmentTimeout().AsDuration() > 0 {
 		seconds := int64((r.GetEnvironmentTimeout().AsDuration() + time.Second - 1) / time.Second)
 		obj.Spec.ActiveDeadlineSeconds = &seconds
@@ -161,8 +169,8 @@ func (s *Server) Create(ctx context.Context, r *pb.CreateRequest) (*pb.CreateRes
 	p, err := s.client.CoreV1().Pods(s.cfg.Namespace).Create(ctx, obj, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		p, err = s.get(ctx, id)
-		if err == nil && p.Annotations["forgejo.org/runner-name"] != r.GetName() {
-			return nil, status.Error(codes.AlreadyExists, "environment name collision")
+		if err == nil && (p.Annotations["forgejo.org/runner-name"] != r.GetName() || len(p.Spec.Containers) != 1 || p.Spec.Containers[0].Image != image) {
+			return nil, status.Error(codes.AlreadyExists, "environment name collision or image mismatch")
 		}
 	}
 	if err != nil {
@@ -176,7 +184,7 @@ func (s *Server) Create(ctx context.Context, r *pb.CreateRequest) (*pb.CreateRes
 	return &pb.CreateResponse{EnvironmentId: id, RootPath: workspace, ActPath: workspace + "/act", ToolCachePath: workspace + "/toolcache", TempPath: workspace + "/tmp", Os: "Linux", Arch: arch, DefaultPathVariable: ptr("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")}, nil
 }
 func ptr(s string) *string { return &s }
-func podSpec(id, name string, c Config) *core.Pod {
+func podSpec(id, name, image string, c Config) *core.Pod {
 	workspaceSize, storageRequest, storageLimit, err := c.storageQuantities()
 	if err != nil {
 		panic(err) // New validates the config before any Pod can be created.
@@ -187,7 +195,7 @@ func podSpec(id, name string, c Config) *core.Pod {
 	return &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: c.Namespace, Labels: map[string]string{"app.kubernetes.io/managed-by": "forgejo-runner-kubernetes", "forgejo.org/execution-id": id}, Annotations: map[string]string{"forgejo.org/runner-name": name}}, Spec: core.PodSpec{
 		RestartPolicy: never, AutomountServiceAccountToken: &no, NodeSelector: map[string]string{"kubernetes.io/arch": c.Arch}, SecurityContext: &core.PodSecurityContext{SeccompProfile: &seccomp, RunAsNonRoot: ptrBool(true), RunAsUser: ptrInt64(10001), FSGroup: ptrInt64(10001)},
 		Volumes: []core.Volume{{Name: "workspace", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &workspaceSize}}}},
-		Containers: []core.Container{{Name: "job", Image: c.Image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
+		Containers: []core.Container{{Name: "job", Image: image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
 			SecurityContext: &core.SecurityContext{AllowPrivilegeEscalation: &no, Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}}}, Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi"), core.ResourceEphemeralStorage: storageRequest}, Limits: core.ResourceList{core.ResourceCPU: resource.MustParse("1"), core.ResourceMemory: resource.MustParse("1Gi"), core.ResourceEphemeralStorage: storageLimit}}}},
 	}}
 }

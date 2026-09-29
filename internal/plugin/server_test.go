@@ -28,7 +28,7 @@ func testConfig() Config {
 func TestPodSpec(t *testing.T) {
 	c := testConfig()
 	id := podName("a job")
-	p := podSpec(id, "a job", c)
+	p := podSpec(id, "a job", c.Image, c)
 	if p.Spec.RestartPolicy != core.RestartPolicyNever || *p.Spec.AutomountServiceAccountToken || p.Spec.NodeSelector["kubernetes.io/arch"] != "arm64" {
 		t.Fatalf("isolation/scheduling: %+v", p.Spec)
 	}
@@ -109,6 +109,59 @@ func TestStorageConfigValidation(t *testing.T) {
 				t.Fatalf("expected error containing %q, got %v", tc.want, err)
 			}
 		})
+	}
+}
+
+func TestCreateImageSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, labelArg, image, want string
+	}{
+		{"label supplies image", "node:24-bookworm", "", "node:24-bookworm"},
+		{"container image overrides label", "node:24-bookworm", "node:26-bookworm", "node:26-bookworm"},
+		{"explicit image without label", "", "node:26-bookworm", "node:26-bookworm"},
+		{"operator fallback", "", "", "ubuntu:24.04"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			kube := fake.NewSimpleClientset()
+			s, err := New(cfg, kube, &rest.Config{Host: "https://example.invalid"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := &pb.CreateRequest{Name: "image-selection", Image: tc.image, LabelArg: tc.labelArg}
+			if _, err := s.Create(context.Background(), req); err != nil {
+				t.Fatal(err)
+			}
+			p, err := kube.CoreV1().Pods(cfg.Namespace).Get(context.Background(), podName(req.Name), metav1.GetOptions{})
+			if err != nil || p.Spec.Containers[0].Image != tc.want {
+				t.Fatalf("image: Pod %v, error %v; want %q", p, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCreateImageValidationAndRetry(t *testing.T) {
+	cfg := testConfig()
+	kube := fake.NewSimpleClientset()
+	s, err := New(cfg, kube, &rest.Config{Host: "https://example.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, image := range []string{" ", " node:24-bookworm", "node:24-bookworm\x00other"} {
+		if _, err := s.Create(ctx, &pb.CreateRequest{Name: "bad-image", Image: image}); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("accepted image %q: %v", image, err)
+		}
+	}
+	req := &pb.CreateRequest{Name: "same-name", LabelArg: "node:24-bookworm"}
+	if _, err := s.Create(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(ctx, req); err != nil {
+		t.Fatalf("same image retry: %v", err)
+	}
+	if _, err := s.Create(ctx, &pb.CreateRequest{Name: req.Name, LabelArg: "node:26-bookworm"}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("silent retry with different image: %v", err)
 	}
 }
 
