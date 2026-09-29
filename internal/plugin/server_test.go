@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"slices"
@@ -57,6 +58,89 @@ func TestPodSpec(t *testing.T) {
 		t.Fatal("invalid deterministic name")
 	}
 }
+func TestJobAppArmorPodSpec(t *testing.T) {
+	for _, tc := range []struct {
+		name, setting string
+		wantType      core.AppArmorProfileType
+		wantName      string
+	}{
+		{"unset", "", "", ""},
+		{"runtime default", "runtime-default", core.AppArmorProfileTypeRuntimeDefault, ""},
+		{"unconfined", "unconfined", core.AppArmorProfileTypeUnconfined, ""},
+		{"localhost", "localhost:ci-jobs", core.AppArmorProfileTypeLocalhost, "ci-jobs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.AppArmorProfile = tc.setting
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			pod := podSpec(podName("app-armor"), "app-armor", cfg.Image, cfg)
+			pc := pod.Spec.SecurityContext
+			container := pod.Spec.Containers[0]
+			security := container.SecurityContext
+			if pc.AppArmorProfile != nil {
+				t.Fatal("AppArmor must be set on the job container, not the Pod")
+			}
+			if tc.wantType == "" {
+				if security.AppArmorProfile != nil {
+					t.Fatalf("unset AppArmor emitted a profile: %+v", security.AppArmorProfile)
+				}
+				encoded, err := json.Marshal(pod)
+				if err != nil || strings.Contains(string(encoded), "appArmorProfile") {
+					t.Fatalf("unset AppArmor must not appear in serialized Pod: %s (%v)", encoded, err)
+				}
+			} else {
+				profile := security.AppArmorProfile
+				if profile == nil || profile.Type != tc.wantType {
+					t.Fatalf("AppArmor type: %+v, want %s", profile, tc.wantType)
+				}
+				if tc.wantName == "" && profile.LocalhostProfile != nil || tc.wantName != "" && (profile.LocalhostProfile == nil || *profile.LocalhostProfile != tc.wantName) {
+					t.Fatalf("AppArmor localhost profile: %+v, want %q", profile, tc.wantName)
+				}
+			}
+			if pc.SeccompProfile == nil || pc.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault || security.SeccompProfile != nil ||
+				pc.RunAsNonRoot == nil || !*pc.RunAsNonRoot || pc.RunAsUser == nil || *pc.RunAsUser != 10001 || pc.FSGroup == nil || *pc.FSGroup != 10001 ||
+				security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation || security.Privileged != nil && *security.Privileged ||
+				security.Capabilities == nil || !slices.Equal(security.Capabilities.Drop, []core.Capability{"ALL"}) || len(security.Capabilities.Add) != 0 ||
+				pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
+				t.Fatalf("other security controls changed: pod=%+v container=%+v", pc, security)
+			}
+		})
+	}
+}
+
+func TestJobAppArmorValidation(t *testing.T) {
+	for _, tc := range []struct {
+		value, want string
+	}{
+		{"", ""},
+		{"runtime-default", ""},
+		{"unconfined", ""},
+		{"localhost:ci-jobs", ""},
+		{"localhost:", "JOB_APPARMOR_PROFILE"},
+		{"localhost:  ", "JOB_APPARMOR_PROFILE"},
+		{"localhost: ci-jobs", "JOB_APPARMOR_PROFILE"},
+		{"localhost:ci-jobs ", "JOB_APPARMOR_PROFILE"},
+		{"localhost:ci\x00jobs", "JOB_APPARMOR_PROFILE"},
+		{"localhost:ci\njobs", "JOB_APPARMOR_PROFILE"},
+		{"RuntimeDefault", "JOB_APPARMOR_PROFILE"},
+		{"runtime-default:ci-jobs", "JOB_APPARMOR_PROFILE"},
+		{"unconfined:ci-jobs", "JOB_APPARMOR_PROFILE"},
+		{"localhost", "JOB_APPARMOR_PROFILE"},
+		{"bogus", "JOB_APPARMOR_PROFILE"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.AppArmorProfile = tc.value
+			_, err := New(cfg, fake.NewSimpleClientset(), &rest.Config{Host: "https://example.invalid"})
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("setting %q: want error containing %q, got %v", tc.value, tc.want, err)
+			}
+		})
+	}
+}
+
 func TestConfiguredStoragePod(t *testing.T) {
 	cfg := testConfig()
 	cfg.WorkspaceSizeLimit = "5Gi"

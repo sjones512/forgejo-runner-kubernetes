@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+func TestJobAppArmorEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		value, wantError string
+	}{
+		{"", ""},
+		{"runtime-default", ""},
+		{"unconfined", ""},
+		{"localhost:ci-jobs", ""},
+		{"localhost:", "JOB_APPARMOR_PROFILE"},
+		{"RuntimeDefault", "JOB_APPARMOR_PROFILE"},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("JOB_APPARMOR_PROFILE", tc.value)
+			cfg, err := jobConfig()
+			if tc.wantError == "" && err != nil || tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("setting %q: want error containing %q, got %v", tc.value, tc.wantError, err)
+			}
+			if err == nil && cfg.AppArmorProfile != tc.value {
+				t.Fatalf("AppArmor setting not applied: %+v", cfg)
+			}
+		})
+	}
+}
+
 func TestJobStorageEnvironment(t *testing.T) {
 	for _, tc := range []struct {
 		name, workspace, request, limit, want string

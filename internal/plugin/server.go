@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	pb "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
 	"google.golang.org/grpc"
@@ -45,14 +46,39 @@ type Config struct {
 	WorkspaceSizeLimit      string // Kubernetes quantities; empty means default.
 	EphemeralStorageRequest string
 	EphemeralStorageLimit   string
+	AppArmorProfile         string // Empty leaves AppArmor unspecified; otherwise runtime-default, unconfined or localhost:<name>.
 }
 
 func (c Config) Validate() error {
 	if c.Namespace == "" || c.Image == "" || (c.Arch != "arm64" && c.Arch != "amd64") || c.StartupTimeout <= 0 || c.CleanupTimeout <= 0 {
 		return fmt.Errorf("namespace, image, arm64/amd64 architecture and positive timeouts are required")
 	}
-	_, _, _, err := c.storageQuantities()
+	if _, _, _, err := c.storageQuantities(); err != nil {
+		return err
+	}
+	_, err := c.appArmorProfile()
 	return err
+}
+
+// Use the container-level API field: it applies only to the job container
+// into which Runner execs, without modifying Pod-wide security defaults.
+func (c Config) appArmorProfile() (*core.AppArmorProfile, error) {
+	switch c.AppArmorProfile {
+	case "":
+		return nil, nil
+	case "runtime-default":
+		return &core.AppArmorProfile{Type: core.AppArmorProfileTypeRuntimeDefault}, nil
+	case "unconfined":
+		return &core.AppArmorProfile{Type: core.AppArmorProfileTypeUnconfined}, nil
+	}
+	if strings.HasPrefix(c.AppArmorProfile, "localhost:") {
+		name := strings.TrimPrefix(c.AppArmorProfile, "localhost:")
+		if name != "" && name == strings.TrimSpace(name) && strings.IndexFunc(name, unicode.IsControl) == -1 {
+			return &core.AppArmorProfile{Type: core.AppArmorProfileTypeLocalhost, LocalhostProfile: &name}, nil
+		}
+		return nil, fmt.Errorf("JOB_APPARMOR_PROFILE: localhost requires a non-empty profile name without surrounding whitespace or control characters")
+	}
+	return nil, fmt.Errorf("JOB_APPARMOR_PROFILE: invalid value %q; use runtime-default, unconfined or localhost:<name> (or leave unset)", c.AppArmorProfile)
 }
 
 // The disk-backed emptyDir is part of the Pod's local ephemeral-storage usage,
@@ -189,6 +215,10 @@ func podSpec(id, name, image string, c Config) *core.Pod {
 	if err != nil {
 		panic(err) // New validates the config before any Pod can be created.
 	}
+	appArmor, err := c.appArmorProfile()
+	if err != nil {
+		panic(err) // New validates the config before any Pod can be created.
+	}
 	no := false
 	never := core.RestartPolicyNever
 	seccomp := core.SeccompProfile{Type: core.SeccompProfileTypeRuntimeDefault}
@@ -196,7 +226,7 @@ func podSpec(id, name, image string, c Config) *core.Pod {
 		RestartPolicy: never, AutomountServiceAccountToken: &no, NodeSelector: map[string]string{"kubernetes.io/arch": c.Arch}, SecurityContext: &core.PodSecurityContext{SeccompProfile: &seccomp, RunAsNonRoot: ptrBool(true), RunAsUser: ptrInt64(10001), FSGroup: ptrInt64(10001)},
 		Volumes: []core.Volume{{Name: "workspace", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &workspaceSize}}}},
 		Containers: []core.Container{{Name: "job", Image: image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
-			SecurityContext: &core.SecurityContext{AllowPrivilegeEscalation: &no, Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}}}, Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi"), core.ResourceEphemeralStorage: storageRequest}, Limits: core.ResourceList{core.ResourceCPU: resource.MustParse("1"), core.ResourceMemory: resource.MustParse("1Gi"), core.ResourceEphemeralStorage: storageLimit}}}},
+			SecurityContext: &core.SecurityContext{AppArmorProfile: appArmor, AllowPrivilegeEscalation: &no, Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}}}, Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi"), core.ResourceEphemeralStorage: storageRequest}, Limits: core.ResourceList{core.ResourceCPU: resource.MustParse("1"), core.ResourceMemory: resource.MustParse("1Gi"), core.ResourceEphemeralStorage: storageLimit}}}},
 	}}
 }
 func ptrBool(v bool) *bool    { return &v }
