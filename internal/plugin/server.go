@@ -181,7 +181,6 @@ func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.
 	})
 	if err != nil {
 		if stream.Context().Err() != nil {
-			s.killCancelled(id)
 			return stream.Context().Err()
 		}
 		if errors.Is(err, context.DeadlineExceeded) {

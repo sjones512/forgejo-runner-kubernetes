@@ -16,7 +16,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	core "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 	kexec "k8s.io/client-go/util/exec"
@@ -117,7 +116,6 @@ func (s *Server) Exec(r *pb.ExecRequest, stream grpc.ServerStreamingServer[pb.Ex
 	}
 	err = s.execPod(stream.Context(), id, argv, nil, chunkWriter{send: func(b []byte) error { return send(pb.DataChunk_STDOUT, b) }}, chunkWriter{send: func(b []byte) error { return send(pb.DataChunk_STDERR, b) }})
 	if stream.Context().Err() != nil {
-		s.killCancelled(id)
 		return stream.Context().Err()
 	}
 	code, failed := exitResult(err)
@@ -125,15 +123,6 @@ func (s *Server) Exec(r *pb.ExecRequest, stream grpc.ServerStreamingServer[pb.Ex
 		return stream.Send(&pb.ExecOutput{Output: &pb.ExecOutput_ExecFailed{ExecFailed: &pb.ExecFailed{ErrorMessage: failed}}})
 	}
 	return stream.Send(&pb.ExecOutput{Output: &pb.ExecOutput_ExecComplete{ExecComplete: &pb.ExecComplete{ExitCode: code}}})
-}
-
-// Best-effort deletion on a cancelled stream: closing a Kubernetes exec SPDY
-// stream is not a reliable remote process kill. Runner will also call Remove.
-func (s *Server) killCancelled(id string) {
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.CleanupTimeout)
-	defer cancel()
-	grace := int64(0)
-	_ = s.client.CoreV1().Pods(s.cfg.Namespace).Delete(ctx, id, metav1.DeleteOptions{GracePeriodSeconds: &grace})
 }
 
 func (s *Server) CopyIn(stream grpc.ClientStreamingServer[pb.CopyInChunk, pb.CopyInResponse]) error {
@@ -191,7 +180,6 @@ func (s *Server) CopyIn(stream grpc.ClientStreamingServer[pb.CopyInChunk, pb.Cop
 	}
 	recvErr := <-received
 	if stream.Context().Err() != nil {
-		s.killCancelled(id)
 		return stream.Context().Err()
 	}
 	if recvErr != nil {
@@ -242,7 +230,6 @@ func (s *Server) CopyOut(r *pb.CopyOutRequest, stream grpc.ServerStreamingServer
 		if e != nil {
 			<-done
 			if stream.Context().Err() != nil {
-				s.killCancelled(id)
 				return stream.Context().Err()
 			}
 			return status.Errorf(codes.Internal, "archive read: %v: %s", e, stderr.String())
@@ -250,7 +237,6 @@ func (s *Server) CopyOut(r *pb.CopyOutRequest, stream grpc.ServerStreamingServer
 	}
 	err := <-done
 	if stream.Context().Err() != nil {
-		s.killCancelled(id)
 		return stream.Context().Err()
 	}
 	if err != nil {
