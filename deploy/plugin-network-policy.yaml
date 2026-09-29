@@ -1,0 +1,19 @@
+# Apply this BEFORE exposing the Service. Edit the namespace and pod selectors
+# to match the trusted Runner's actual namespace and Pod labels. If these
+# selectors don't match, the example fails closed (Runner cannot connect).
+# Requires an enforcing Kubernetes NetworkPolicy implementation.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: plugin-only-from-runner
+  namespace: forgejo-runner
+spec:
+  podSelector:
+    matchLabels: {app: forgejo-runner-kubernetes}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: forgejo-runner}
+      ports:
+        - {protocol: TCP, port: 50051}

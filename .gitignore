@@ -1,0 +1,21 @@
+# Local build/test outputs
+/forgejo-runner-kubernetes
+/*.test
+/coverage.out
+/dist/
+*.prof
+
+# Local configuration / credentials (never commit these)
+.env
+.env.*
+*.kubeconfig
+kubeconfig
+.kube/
+*.agekey
+*.sops.yaml
+*.sops.yml
+
+# Editor/system files
+.DS_Store
+.idea/
+.vscode/

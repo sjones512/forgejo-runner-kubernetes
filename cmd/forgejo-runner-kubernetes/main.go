@@ -1,0 +1,67 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	pb "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
+	"forgejo-runner-kubernetes/internal/plugin"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+)
+
+func env(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+func run() error {
+	cfg := plugin.Config{Namespace: env("JOB_NAMESPACE", "forgejo-jobs"), Image: env("JOB_IMAGE", "ubuntu:24.04"), Arch: env("JOB_ARCH", "arm64"), StartupTimeout: 3 * time.Minute, CleanupTimeout: 30 * time.Second}
+	rc, err := rest.InClusterConfig()
+	if err != nil {
+		return fmt.Errorf("in-cluster Kubernetes credentials: %w", err)
+	}
+	client, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		return err
+	}
+	server, err := plugin.New(cfg, client, rc)
+	if err != nil {
+		return err
+	}
+	addr := env("PLUGIN_LISTEN_ADDR", "0.0.0.0:50051")
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	grpcServer := grpc.NewServer()
+	pb.RegisterBackendPluginServer(grpcServer, server)
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+		grpcServer.GracefulStop()
+	}()
+	log.Printf("listening on %s, namespace %s", lis.Addr(), cfg.Namespace)
+	return grpcServer.Serve(lis)
+}
+func main() {
+	if err := run(); err != nil {
+		log.Print(err)
+		os.Exit(1)
+	}
+}
