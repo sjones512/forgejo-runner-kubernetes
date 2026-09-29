@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"path"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -21,9 +20,8 @@ import (
 	kexec "k8s.io/client-go/util/exec"
 )
 
-// Kubernetes exec has no env or cwd fields; the constrained ubuntu image
-// supplies /usr/bin/env and /bin/sh. Values are passed as argv, never shell-expanded.
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+// Kubernetes exec has no env or cwd fields; /usr/bin/env and /bin/sh are
+// supplied by the job image. Assignments are passed as argv, not shell syntax.
 
 func commandArgs(r *pb.ExecRequest) ([]string, error) {
 	if len(r.GetCommand()) == 0 || r.GetCommand()[0] == "" || r.GetUser() != "" {
@@ -36,14 +34,14 @@ func commandArgs(r *pb.ExecRequest) ([]string, error) {
 	if !safePath(wd) {
 		return nil, status.Error(codes.InvalidArgument, "workdir outside workspace")
 	}
-	args := []string{"/usr/bin/env", "-i", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	args := []string{"/usr/bin/env", "-i", "--", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 	keys := make([]string, 0, len(r.GetEnv()))
 	for k := range r.GetEnv() {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if !envName.MatchString(k) || strings.ContainsRune(r.GetEnv()[k], 0) {
+		if k == "" || strings.ContainsAny(k, "=\x00") || strings.ContainsRune(r.GetEnv()[k], 0) {
 			return nil, status.Error(codes.InvalidArgument, "invalid environment variable")
 		}
 		args = append(args, k+"="+r.GetEnv()[k])

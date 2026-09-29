@@ -3,6 +3,8 @@ package plugin
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -145,14 +147,48 @@ func TestExecTranslation(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Workdir = "/shared"
-	r.Env = map[string]string{"BAD-NAME": "x"}
-	if _, err := commandArgs(r); status.Code(err) != codes.InvalidArgument {
-		t.Fatal(err)
+	for _, env := range []map[string]string{
+		{"": "value"}, {"A=B": "value"}, {"BAD\x00NAME": "value"}, {"GOOD": "bad\x00value"},
+	} {
+		r.Env = env
+		if _, err := commandArgs(r); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("env %q: expected InvalidArgument, got %v", env, err)
+		}
 	}
 	r.Env = nil
 	r.User = new(string)
 	*r.User = "root"
 	if _, err := commandArgs(r); status.Code(err) != codes.InvalidArgument {
 		t.Fatal(err)
+	}
+}
+
+func TestExecEnvironmentArgv(t *testing.T) {
+	r := &pb.ExecRequest{Command: []string{"node", "action.js"}, Workdir: "/workspace", Env: map[string]string{
+		"INPUT_FETCH-DEPTH": "0", "INPUT_NODE-VERSION-FILE": ".node-version", "A.B": "dot", "--help": "not an env option", "VALUE": "a=b",
+	}}
+	args, err := commandArgs(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(args[:3], []string{"/usr/bin/env", "-i", "--"}) {
+		t.Fatalf("env option boundary: %q", args[:3])
+	}
+	// Probe the same argv prefix through env -> sh -> env. Neither env's option
+	// parser nor sh may interpret the assignment names as shell identifiers.
+	end := slices.Index(args, "/bin/sh")
+	if end < 0 {
+		t.Fatal(args)
+	}
+	probe := append(append([]string(nil), args[1:end]...), "/bin/sh", "-c", "/usr/bin/env")
+	out, err := exec.Command(args[0], probe...).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(out), "\n")
+	for k, v := range r.Env {
+		if !slices.Contains(lines, k+"="+v) {
+			t.Fatalf("lost %q in child environment: %q", k, out)
+		}
 	}
 }

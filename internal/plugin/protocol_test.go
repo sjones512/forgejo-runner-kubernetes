@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,6 +28,7 @@ func TestStreamingProtocol(t *testing.T) {
 		t.Fatal(e)
 	}
 	var uploaded []byte
+	var executed []string
 	s.execFn = func(_ context.Context, _ string, args []string, in io.Reader, out, errout io.Writer) error {
 		cmd := strings.Join(args, " ")
 		switch {
@@ -44,6 +46,7 @@ func TestStreamingProtocol(t *testing.T) {
 			}
 			return tw.Close()
 		default:
+			executed = append([]string(nil), args...)
 			out.Write([]byte("hello\n"))
 			errout.Write([]byte("warning\n"))
 			return kexec.CodeExitError{Err: errors.New("exit status 42"), Code: 42}
@@ -82,7 +85,9 @@ func TestStreamingProtocol(t *testing.T) {
 	if string(uploaded) != "example archive" {
 		t.Fatalf("upload %q", uploaded)
 	}
-	exec, e := client.Exec(ctx, &pb.ExecRequest{EnvironmentId: id, Command: []string{"sh", "step.sh"}, Workdir: "/workspace/org/repo"})
+	exec, e := client.Exec(ctx, &pb.ExecRequest{EnvironmentId: id, Command: []string{"sh", "step.sh"}, Workdir: "/workspace/org/repo", Env: map[string]string{
+		"INPUT_FETCH-DEPTH": "0", "INPUT_PERSIST-CREDENTIALS": "false", "INPUT_NODE-VERSION-FILE": ".node-version", "INPUT_PACKAGE-MANAGER-CACHE": "false", "A.B": "dot",
+	}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -105,6 +110,11 @@ func TestStreamingProtocol(t *testing.T) {
 	}
 	if exit != 42 || got[pb.DataChunk_STDOUT] != "hello\n" || got[pb.DataChunk_STDERR] != "warning\n" {
 		t.Fatalf("exit %d streams %v", exit, got)
+	}
+	for _, entry := range []string{"INPUT_FETCH-DEPTH=0", "INPUT_PERSIST-CREDENTIALS=false", "INPUT_NODE-VERSION-FILE=.node-version", "INPUT_PACKAGE-MANAGER-CACHE=false", "A.B=dot"} {
+		if !slices.Contains(executed, entry) {
+			t.Fatalf("Exec did not forward %q: argv %q", entry, executed)
+		}
 	}
 	copyOut, e := client.CopyOut(ctx, &pb.CopyOutRequest{EnvironmentId: id, SrcPath: "/shared/act/env"})
 	if e != nil {
