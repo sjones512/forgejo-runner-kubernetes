@@ -1,0 +1,33 @@
+# Place in the *target repository's* .forgejo/workflows/ (not this plugin's CI).
+# Prerequisites and unresolved image/input constraints: docs/actions-integration.md.
+# Confirm the registered k3s label maps to JOB_IMAGE with an ARM64 Node 24
+# bootstrap runtime, git, GNU tar and bash; ubuntu:24.04 alone lacks Node.
+name: Kubernetes plugin actions smoke test
+on:
+  workflow_dispatch:
+jobs:
+  verify-plugin:
+    runs-on: k3s
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Verify checkout and Node
+        run: |
+          git status
+          git log -1 --oneline
+          test -f .node-version
+          node --version
+          npm --version
+          command -v node
+          # Distinguishes setup-node's selected toolcache Node from the
+          # bootstrap Node supplied by the job image.
+          case "$(command -v node)" in
+            "$RUNNER_TOOL_CACHE"/*) ;;
+            *) echo 'setup-node did not select a toolcache Node' >&2; exit 1 ;;
+          esac
