@@ -25,8 +25,22 @@ func env(k, def string) string {
 	}
 	return def
 }
+func jobConfig() (plugin.Config, error) {
+	cfg := plugin.Config{
+		Namespace: env("JOB_NAMESPACE", "forgejo-jobs"), Image: env("JOB_IMAGE", "ubuntu:24.04"), Arch: env("JOB_ARCH", "arm64"),
+		StartupTimeout: 3 * time.Minute, CleanupTimeout: 30 * time.Second,
+		WorkspaceSizeLimit: os.Getenv("JOB_WORKSPACE_SIZE_LIMIT"), EphemeralStorageRequest: os.Getenv("JOB_EPHEMERAL_STORAGE_REQUEST"), EphemeralStorageLimit: os.Getenv("JOB_EPHEMERAL_STORAGE_LIMIT"),
+	}
+	if err := cfg.Validate(); err != nil {
+		return cfg, fmt.Errorf("job configuration: %w", err)
+	}
+	return cfg, nil
+}
 func run() error {
-	cfg := plugin.Config{Namespace: env("JOB_NAMESPACE", "forgejo-jobs"), Image: env("JOB_IMAGE", "ubuntu:24.04"), Arch: env("JOB_ARCH", "arm64"), StartupTimeout: 3 * time.Minute, CleanupTimeout: 30 * time.Second}
+	cfg, err := jobConfig()
+	if err != nil {
+		return err
+	}
 	rc, err := rest.InClusterConfig()
 	if err != nil {
 		return fmt.Errorf("in-cluster Kubernetes credentials: %w", err)

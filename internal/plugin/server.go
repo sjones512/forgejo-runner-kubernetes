@@ -28,21 +28,64 @@ import (
 const prefix = "fj-exec-"
 const workspace = "/shared"
 
+const (
+	defaultWorkspaceSizeLimit      = "1Gi"
+	defaultEphemeralStorageRequest = "256Mi"
+	defaultEphemeralStorageLimit   = "2Gi"
+)
+
 // Config intentionally fixes the job image and namespace: workflow inputs cannot
 // widen either trust boundary in this first milestone.
 type Config struct {
-	Namespace      string
-	Image          string
-	Arch           string
-	StartupTimeout time.Duration
-	CleanupTimeout time.Duration
+	Namespace               string
+	Image                   string
+	Arch                    string
+	StartupTimeout          time.Duration
+	CleanupTimeout          time.Duration
+	WorkspaceSizeLimit      string // Kubernetes quantities; empty means default.
+	EphemeralStorageRequest string
+	EphemeralStorageLimit   string
 }
 
 func (c Config) Validate() error {
 	if c.Namespace == "" || c.Image == "" || (c.Arch != "arm64" && c.Arch != "amd64") || c.StartupTimeout <= 0 || c.CleanupTimeout <= 0 {
 		return fmt.Errorf("namespace, image, arm64/amd64 architecture and positive timeouts are required")
 	}
-	return nil
+	_, _, _, err := c.storageQuantities()
+	return err
+}
+
+// The disk-backed emptyDir is part of the Pod's local ephemeral-storage usage,
+// not extra capacity. Leave room above its cap for writable layers and logs.
+func (c Config) storageQuantities() (workspaceSize, request, limit resource.Quantity, err error) {
+	parse := func(name, raw, def string) (resource.Quantity, error) {
+		if raw == "" {
+			raw = def
+		}
+		q, e := resource.ParseQuantity(raw)
+		if e != nil {
+			return q, fmt.Errorf("%s: invalid Kubernetes quantity %q: %w", name, raw, e)
+		}
+		if q.Sign() <= 0 {
+			return q, fmt.Errorf("%s must be positive: %q", name, raw)
+		}
+		return q, nil
+	}
+	if workspaceSize, err = parse("JOB_WORKSPACE_SIZE_LIMIT", c.WorkspaceSizeLimit, defaultWorkspaceSizeLimit); err != nil {
+		return
+	}
+	if request, err = parse("JOB_EPHEMERAL_STORAGE_REQUEST", c.EphemeralStorageRequest, defaultEphemeralStorageRequest); err != nil {
+		return
+	}
+	if limit, err = parse("JOB_EPHEMERAL_STORAGE_LIMIT", c.EphemeralStorageLimit, defaultEphemeralStorageLimit); err != nil {
+		return
+	}
+	if request.Cmp(limit) > 0 {
+		err = fmt.Errorf("JOB_EPHEMERAL_STORAGE_REQUEST must not exceed JOB_EPHEMERAL_STORAGE_LIMIT")
+	} else if workspaceSize.Cmp(limit) >= 0 {
+		err = fmt.Errorf("JOB_WORKSPACE_SIZE_LIMIT must be less than JOB_EPHEMERAL_STORAGE_LIMIT to leave room for container layers and logs")
+	}
+	return
 }
 
 type Server struct {
@@ -134,19 +177,22 @@ func (s *Server) Create(ctx context.Context, r *pb.CreateRequest) (*pb.CreateRes
 }
 func ptr(s string) *string { return &s }
 func podSpec(id, name string, c Config) *core.Pod {
+	workspaceSize, storageRequest, storageLimit, err := c.storageQuantities()
+	if err != nil {
+		panic(err) // New validates the config before any Pod can be created.
+	}
 	no := false
 	never := core.RestartPolicyNever
 	seccomp := core.SeccompProfile{Type: core.SeccompProfileTypeRuntimeDefault}
 	return &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: c.Namespace, Labels: map[string]string{"app.kubernetes.io/managed-by": "forgejo-runner-kubernetes", "forgejo.org/execution-id": id}, Annotations: map[string]string{"forgejo.org/runner-name": name}}, Spec: core.PodSpec{
 		RestartPolicy: never, AutomountServiceAccountToken: &no, NodeSelector: map[string]string{"kubernetes.io/arch": c.Arch}, SecurityContext: &core.PodSecurityContext{SeccompProfile: &seccomp, RunAsNonRoot: ptrBool(true), RunAsUser: ptrInt64(10001), FSGroup: ptrInt64(10001)},
-		Volumes: []core.Volume{{Name: "workspace", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: resourcePtr("1Gi")}}}},
+		Volumes: []core.Volume{{Name: "workspace", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &workspaceSize}}}},
 		Containers: []core.Container{{Name: "job", Image: c.Image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
-			SecurityContext: &core.SecurityContext{AllowPrivilegeEscalation: &no, Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}}}, Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi"), core.ResourceEphemeralStorage: resource.MustParse("256Mi")}, Limits: core.ResourceList{core.ResourceCPU: resource.MustParse("1"), core.ResourceMemory: resource.MustParse("1Gi"), core.ResourceEphemeralStorage: resource.MustParse("2Gi")}}}},
+			SecurityContext: &core.SecurityContext{AllowPrivilegeEscalation: &no, Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}}}, Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi"), core.ResourceEphemeralStorage: storageRequest}, Limits: core.ResourceList{core.ResourceCPU: resource.MustParse("1"), core.ResourceMemory: resource.MustParse("1Gi"), core.ResourceEphemeralStorage: storageLimit}}}},
 	}}
 }
-func ptrBool(v bool) *bool                    { return &v }
-func ptrInt64(v int64) *int64                 { return &v }
-func resourcePtr(v string) *resource.Quantity { q := resource.MustParse(v); return &q }
+func ptrBool(v bool) *bool    { return &v }
+func ptrInt64(v int64) *int64 { return &v }
 func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.StartOutput]) error {
 	id := r.GetEnvironmentId()
 	if err := s.checkID(id); err != nil {

@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	core "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -43,6 +44,12 @@ func TestPodSpec(t *testing.T) {
 	if p.Spec.Volumes[0].EmptyDir == nil || p.Spec.Volumes[0].EmptyDir.SizeLimit == nil || len(p.Spec.Containers[0].VolumeMounts) != 2 {
 		t.Fatal("workspace not ephemeral")
 	}
+	storageRequest := p.Spec.Containers[0].Resources.Requests[core.ResourceEphemeralStorage]
+	storageLimit := p.Spec.Containers[0].Resources.Limits[core.ResourceEphemeralStorage]
+	if p.Spec.Volumes[0].EmptyDir.SizeLimit.Cmp(resource.MustParse("1Gi")) != 0 ||
+		storageRequest.Cmp(resource.MustParse("256Mi")) != 0 || storageLimit.Cmp(resource.MustParse("2Gi")) != 0 {
+		t.Fatal("default storage budget changed")
+	}
 	if strings.Contains(p.Annotations["forgejo.org/runner-name"], "secret") {
 		t.Fatal("unexpected annotation")
 	}
@@ -50,6 +57,61 @@ func TestPodSpec(t *testing.T) {
 		t.Fatal("invalid deterministic name")
 	}
 }
+func TestConfiguredStoragePod(t *testing.T) {
+	cfg := testConfig()
+	cfg.WorkspaceSizeLimit = "5Gi"
+	cfg.EphemeralStorageRequest = "3Gi"
+	cfg.EphemeralStorageLimit = "7Gi"
+	client := fake.NewSimpleClientset()
+	s, err := New(cfg, client, &rest.Config{Host: "https://example.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(context.Background(), &pb.CreateRequest{Name: "storage", Image: cfg.Image}); err != nil {
+		t.Fatal(err)
+	}
+	pods, err := client.CoreV1().Pods(cfg.Namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("pods: %d, %v", len(pods.Items), err)
+	}
+	pod := pods.Items[0]
+	storageRequest := pod.Spec.Containers[0].Resources.Requests[core.ResourceEphemeralStorage]
+	storageLimit := pod.Spec.Containers[0].Resources.Limits[core.ResourceEphemeralStorage]
+	if pod.Spec.Volumes[0].EmptyDir.SizeLimit.Cmp(resource.MustParse("5Gi")) != 0 ||
+		storageRequest.Cmp(resource.MustParse("3Gi")) != 0 || storageLimit.Cmp(resource.MustParse("7Gi")) != 0 {
+		t.Fatalf("configured storage not reflected in Pod: %+v", pod.Spec)
+	}
+}
+
+func TestStorageConfigValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, workspace, request, limit, want string
+	}{
+		{"default", "", "", "", ""},
+		{"custom", "5Gi", "3Gi", "7Gi", ""},
+		{"request equals limit", "1Gi", "2Gi", "2Gi", ""},
+		{"invalid workspace", "bogus", "", "", "JOB_WORKSPACE_SIZE_LIMIT"},
+		{"negative workspace", "-1Gi", "", "", "JOB_WORKSPACE_SIZE_LIMIT"},
+		{"zero workspace", "0", "", "", "JOB_WORKSPACE_SIZE_LIMIT"},
+		{"invalid request", "", "1GiB", "", "JOB_EPHEMERAL_STORAGE_REQUEST"},
+		{"zero request", "", "0", "", "JOB_EPHEMERAL_STORAGE_REQUEST"},
+		{"invalid limit", "", "", "2Gii", "JOB_EPHEMERAL_STORAGE_LIMIT"},
+		{"negative limit", "", "", "-1Gi", "JOB_EPHEMERAL_STORAGE_LIMIT"},
+		{"workspace exceeds default limit", "5Gi", "", "", "JOB_WORKSPACE_SIZE_LIMIT"},
+		{"workspace equals limit", "2Gi", "", "2Gi", "JOB_WORKSPACE_SIZE_LIMIT"},
+		{"request exceeds limit", "", "3Gi", "2Gi", "JOB_EPHEMERAL_STORAGE_REQUEST"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.WorkspaceSizeLimit, cfg.EphemeralStorageRequest, cfg.EphemeralStorageLimit = tc.workspace, tc.request, tc.limit
+			_, err := New(cfg, fake.NewSimpleClientset(), &rest.Config{Host: "https://example.invalid"})
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("expected error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestLifecycleCreateRemove(t *testing.T) {
 	ctx := context.Background()
 	c := testConfig()
