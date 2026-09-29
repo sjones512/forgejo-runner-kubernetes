@@ -186,9 +186,27 @@ func TestExecEnvironmentArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(string(out), "\n")
+	if !slices.Contains(lines, "HOME=/shared/workdir") {
+		t.Fatalf("no writable HOME for unlisted numeric UID: %q", out)
+	}
 	for k, v := range r.Env {
 		if !slices.Contains(lines, k+"="+v) {
 			t.Fatalf("lost %q in child environment: %q", k, out)
 		}
+	}
+	r.Env["HOME"] = "/workspace/custom-home"
+	args, err = commandArgs(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wd = slices.Index(args, "forgejo") + 1
+	args[wd] = t.TempDir()
+	out, err = exec.Command(args[0], args[1:]...).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines = strings.Split(string(out), "\n")
+	if !slices.Contains(lines, "HOME=/workspace/custom-home") || slices.Contains(lines, "HOME=/shared/workdir") {
+		t.Fatalf("Runner HOME override not preserved: %q", out)
 	}
 }

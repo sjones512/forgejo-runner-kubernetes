@@ -40,6 +40,12 @@ func commandArgs(r *pb.ExecRequest) ([]string, error) {
 	// drop non-identifier keys (e.g. INPUT_FETCH-DEPTH) on startup.
 	args := []string{"/usr/bin/env", "-i", "--", defaultPath, "/bin/sh", "-c",
 		`mkdir -p -- "$1" && cd -- "$1" && shift && exec /usr/bin/env -i -- "$@"`, "forgejo", wd, defaultPath}
+	// Numeric UID 10001 has no passwd entry; without HOME, Node's os.homedir()
+	// fails before checkout can initialize the repository. The Pod creates this
+	// writable directory at startup. Preserve an explicit Runner HOME override.
+	if _, ok := r.GetEnv()["HOME"]; !ok {
+		args = append(args, "HOME="+workspace+"/workdir")
+	}
 	keys := make([]string, 0, len(r.GetEnv()))
 	for k := range r.GetEnv() {
 		keys = append(keys, k)
