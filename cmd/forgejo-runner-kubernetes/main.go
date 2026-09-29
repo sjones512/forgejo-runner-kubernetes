@@ -26,11 +26,22 @@ func env(k, def string) string {
 	return def
 }
 func jobConfig() (plugin.Config, error) {
+	dindEnabled := os.Getenv("JOB_DIND_ENABLED")
+	if dindEnabled != "" && dindEnabled != "false" && dindEnabled != "true" {
+		return plugin.Config{}, fmt.Errorf("JOB_DIND_ENABLED: use true or false (default false)")
+	}
 	cfg := plugin.Config{
 		Namespace: env("JOB_NAMESPACE", "forgejo-jobs"), Image: env("JOB_IMAGE", "ubuntu:24.04"), Arch: env("JOB_ARCH", "arm64"),
 		StartupTimeout: 3 * time.Minute, CleanupTimeout: 30 * time.Second,
 		WorkspaceSizeLimit: os.Getenv("JOB_WORKSPACE_SIZE_LIMIT"), EphemeralStorageRequest: os.Getenv("JOB_EPHEMERAL_STORAGE_REQUEST"), EphemeralStorageLimit: os.Getenv("JOB_EPHEMERAL_STORAGE_LIMIT"),
 		AppArmorProfile: os.Getenv("JOB_APPARMOR_PROFILE"),
+		DinD: plugin.DinDConfig{
+			Enabled: dindEnabled == "true", Image: os.Getenv("JOB_DIND_IMAGE"),
+			CPURequest: os.Getenv("JOB_DIND_CPU_REQUEST"), CPULimit: os.Getenv("JOB_DIND_CPU_LIMIT"),
+			MemoryRequest: os.Getenv("JOB_DIND_MEMORY_REQUEST"), MemoryLimit: os.Getenv("JOB_DIND_MEMORY_LIMIT"),
+			EphemeralStorageRequest: os.Getenv("JOB_DIND_EPHEMERAL_STORAGE_REQUEST"), EphemeralStorageLimit: os.Getenv("JOB_DIND_EPHEMERAL_STORAGE_LIMIT"),
+			DataSizeLimit: os.Getenv("JOB_DIND_DATA_SIZE_LIMIT"), StorageDriver: os.Getenv("JOB_DIND_STORAGE_DRIVER"),
+		},
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, fmt.Errorf("job configuration: %w", err)

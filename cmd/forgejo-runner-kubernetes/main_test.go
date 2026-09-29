@@ -5,6 +5,54 @@ import (
 	"testing"
 )
 
+func TestJobDinDEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"disabled default", nil, ""},
+		{"explicitly disabled", map[string]string{"JOB_DIND_ENABLED": "false"}, ""},
+		{"enabled pinned image", map[string]string{"JOB_DIND_ENABLED": "true", "JOB_DIND_IMAGE": "docker@sha256:" + strings.Repeat("a", 64)}, ""},
+		{"invalid boolean", map[string]string{"JOB_DIND_ENABLED": "yes"}, "JOB_DIND_ENABLED"},
+		{"missing image", map[string]string{"JOB_DIND_ENABLED": "true"}, "JOB_DIND_IMAGE"},
+		{"mutable image", map[string]string{"JOB_DIND_ENABLED": "true", "JOB_DIND_IMAGE": "docker:29-dind"}, "JOB_DIND_IMAGE"},
+		{"invalid resource while disabled", map[string]string{"JOB_DIND_MEMORY_REQUEST": "0"}, "JOB_DIND_MEMORY_REQUEST"},
+		{"reversed data/storage budget", map[string]string{"JOB_DIND_DATA_SIZE_LIMIT": "12Gi"}, "JOB_DIND_DATA_SIZE_LIMIT"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, key := range []string{"JOB_DIND_ENABLED", "JOB_DIND_IMAGE", "JOB_DIND_CPU_REQUEST", "JOB_DIND_CPU_LIMIT", "JOB_DIND_MEMORY_REQUEST", "JOB_DIND_MEMORY_LIMIT", "JOB_DIND_EPHEMERAL_STORAGE_REQUEST", "JOB_DIND_EPHEMERAL_STORAGE_LIMIT", "JOB_DIND_DATA_SIZE_LIMIT", "JOB_DIND_STORAGE_DRIVER"} {
+				t.Setenv(key, tc.env[key])
+			}
+			cfg, err := jobConfig()
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+			if err == nil && (cfg.DinD.Enabled != (tc.env["JOB_DIND_ENABLED"] == "true") || cfg.DinD.Image != tc.env["JOB_DIND_IMAGE"]) {
+				t.Fatal("environment not applied", cfg.DinD)
+			}
+		})
+	}
+	t.Setenv("JOB_DIND_ENABLED", "true")
+	t.Setenv("JOB_DIND_IMAGE", "docker@sha256:"+strings.Repeat("a", 64))
+	t.Setenv("JOB_DIND_CPU_REQUEST", "500m")
+	t.Setenv("JOB_DIND_CPU_LIMIT", "4")
+	t.Setenv("JOB_DIND_MEMORY_REQUEST", "1Gi")
+	t.Setenv("JOB_DIND_MEMORY_LIMIT", "4Gi")
+	t.Setenv("JOB_DIND_EPHEMERAL_STORAGE_REQUEST", "3Gi")
+	t.Setenv("JOB_DIND_EPHEMERAL_STORAGE_LIMIT", "25Gi")
+	t.Setenv("JOB_DIND_DATA_SIZE_LIMIT", "20Gi")
+	t.Setenv("JOB_DIND_STORAGE_DRIVER", "vfs")
+	cfg, err := jobConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := cfg.DinD
+	if d.CPURequest != "500m" || d.CPULimit != "4" || d.MemoryRequest != "1Gi" || d.MemoryLimit != "4Gi" || d.EphemeralStorageRequest != "3Gi" || d.EphemeralStorageLimit != "25Gi" || d.DataSizeLimit != "20Gi" || d.StorageDriver != "vfs" {
+		t.Fatal("resource/driver environment not applied", d)
+	}
+}
+
 func TestJobAppArmorEnvironment(t *testing.T) {
 	for _, tc := range []struct {
 		value, wantError string

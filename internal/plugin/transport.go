@@ -24,6 +24,11 @@ import (
 // supplied by the job image. Assignments are passed as argv, not shell syntax.
 
 func commandArgs(r *pb.ExecRequest) ([]string, error) {
+	return commandArgsWithDefaults(r, nil)
+}
+
+func commandArgsWithDefaults(r *pb.ExecRequest, defaults map[string]string) ([]string, error) {
+	env := mergeExecDefaults(r.GetEnv(), defaults)
 	if len(r.GetCommand()) == 0 || r.GetCommand()[0] == "" || r.GetUser() != "" {
 		return nil, status.Error(codes.InvalidArgument, "command required; per-exec user unsupported")
 	}
@@ -43,19 +48,19 @@ func commandArgs(r *pb.ExecRequest) ([]string, error) {
 	// Numeric UID 10001 has no passwd entry; without HOME, Node's os.homedir()
 	// fails before checkout can initialize the repository. The Pod creates this
 	// writable directory at startup. Preserve an explicit Runner HOME override.
-	if _, ok := r.GetEnv()["HOME"]; !ok {
+	if _, ok := env["HOME"]; !ok {
 		args = append(args, "HOME="+workspace+"/workdir")
 	}
-	keys := make([]string, 0, len(r.GetEnv()))
-	for k := range r.GetEnv() {
+	keys := make([]string, 0, len(env))
+	for k := range env {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if k == "" || strings.ContainsAny(k, "=\x00") || strings.ContainsRune(r.GetEnv()[k], 0) {
+		if k == "" || strings.ContainsAny(k, "=\x00") || strings.ContainsRune(env[k], 0) {
 			return nil, status.Error(codes.InvalidArgument, "invalid environment variable")
 		}
-		args = append(args, k+"="+r.GetEnv()[k])
+		args = append(args, k+"="+env[k])
 	}
 	args = append(args, r.GetCommand()...)
 	return args, nil
@@ -109,10 +114,11 @@ func (s *Server) Exec(r *pb.ExecRequest, stream grpc.ServerStreamingServer[pb.Ex
 	}
 	unlock := s.lock(id)
 	defer unlock()
-	if _, err := s.get(stream.Context(), id); err != nil {
+	p, err := s.get(stream.Context(), id)
+	if err != nil {
 		return err
 	}
-	argv, err := commandArgs(r)
+	argv, err := commandArgsWithDefaults(r, podExecDefaults(p))
 	if err != nil {
 		return err
 	}

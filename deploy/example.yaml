@@ -63,6 +63,19 @@ spec:
             - {name: JOB_WORKSPACE_SIZE_LIMIT, value: 1Gi}
             - {name: JOB_EPHEMERAL_STORAGE_REQUEST, value: 256Mi}
             - {name: JOB_EPHEMERAL_STORAGE_LIMIT, value: 2Gi}
+            # Opt-in only: requires Privileged PSA in the JOB namespace.
+            # The plugin container below stays nonprivileged.
+            - {name: JOB_DIND_ENABLED, value: 'false'}
+            # Supply your trusted digest before setting true; example ARM64/amd64 index:
+            # - {name: JOB_DIND_IMAGE, value: 'docker.io/library/docker@sha256:3f3c01aaaebf7cce837356b688b7c059a4749f10bd7660dec7c58fc454a283f0'}
+            # Daemon budgets (defaults shown); raise coherently for real builds.
+            # - {name: JOB_DIND_CPU_REQUEST, value: 100m}
+            # - {name: JOB_DIND_CPU_LIMIT, value: '2'}
+            # - {name: JOB_DIND_MEMORY_REQUEST, value: 128Mi}
+            # - {name: JOB_DIND_MEMORY_LIMIT, value: 2Gi}
+            # - {name: JOB_DIND_DATA_SIZE_LIMIT, value: 10Gi}
+            # - {name: JOB_DIND_EPHEMERAL_STORAGE_REQUEST, value: 1Gi}
+            # - {name: JOB_DIND_EPHEMERAL_STORAGE_LIMIT, value: 12Gi}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: [ALL]}
