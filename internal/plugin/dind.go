@@ -12,6 +12,7 @@ import (
 const (
 	dockerSocketDir = "/run/forgejo-docker"
 	dockerHost      = "unix://" + dockerSocketDir + "/docker.sock"
+	dockerDataRoot  = "/var/lib/docker"
 	dindTemplate    = "forgejo.org/dind-template-sha256"
 )
 
@@ -115,7 +116,7 @@ func (c DinDConfig) addToPod(p *core.Pod) {
 	job.Env = []core.EnvVar{{Name: "DOCKER_HOST", Value: dockerHost}, {Name: "TMPDIR", Value: workspace + "/tmp"}}
 	// Explicit dockerd arguments avoid the official image's default wildcard
 	// TCP listener. Keep its entrypoint for DinD initialization/reaping.
-	args := []string{"dockerd", "--host=" + dockerHost, "--group=10001", "--data-root=/var/lib/docker", "--exec-root=/run/forgejo-docker-state"}
+	args := []string{"dockerd", "--host=" + dockerHost, "--group=10001", "--data-root=" + dockerDataRoot, "--exec-root=/run/forgejo-docker-state"}
 	if c.StorageDriver != "" {
 		args = append(args, "--storage-driver="+c.StorageDriver)
 	}
@@ -131,9 +132,10 @@ func (c DinDConfig) addToPod(p *core.Pod) {
 		VolumeMounts: []core.VolumeMount{
 			{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"},
 			{Name: "docker-socket", MountPath: dockerSocketDir},
-			// Covers /var/lib/docker and /var/lib/containerd with ONE data cap,
-			// including images that default to the newer containerd image store.
-			{Name: "docker-data", MountPath: "/var/lib"},
+			// Mount at the exact data root, not its parent: official DinD declares
+			// VOLUME /var/lib/docker, which can shadow a parent /var/lib mount.
+			// Share the fixed path with --data-root so the two cannot drift.
+			{Name: "docker-data", MountPath: dockerDataRoot},
 		},
 		ReadinessProbe: &core.Probe{
 			ProbeHandler:   core.ProbeHandler{Exec: &core.ExecAction{Command: []string{"docker", "--host=" + dockerHost, "info"}}},

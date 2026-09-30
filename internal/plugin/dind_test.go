@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	core "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
@@ -93,7 +94,7 @@ func TestDinDPodIsolationAndMounts(t *testing.T) {
 					t.Fatalf("missing common bind/socket path %+v", m)
 				}
 			}
-			if !hasMount(daemon.VolumeMounts, core.VolumeMount{Name: "docker-data", MountPath: "/var/lib"}) || hasMount(job.VolumeMounts, core.VolumeMount{Name: "docker-data", MountPath: "/var/lib"}) {
+			if !hasMount(daemon.VolumeMounts, core.VolumeMount{Name: "docker-data", MountPath: "/var/lib/docker"}) || hasMount(job.VolumeMounts, core.VolumeMount{Name: "docker-data", MountPath: "/var/lib/docker"}) {
 				t.Fatal("daemon state must not be mounted in job")
 			}
 			if !slices.Contains(job.Env, core.EnvVar{Name: "DOCKER_HOST", Value: dockerHost}) || !slices.Contains(job.Env, core.EnvVar{Name: "TMPDIR", Value: "/shared/tmp"}) {
@@ -105,6 +106,66 @@ func TestDinDPodIsolationAndMounts(t *testing.T) {
 			probe := daemon.ReadinessProbe
 			if probe == nil || !slices.Equal(probe.Exec.Command, []string{"docker", "--host=" + dockerHost, "info"}) || probe.TimeoutSeconds <= 0 || probe.PeriodSeconds <= 0 {
 				t.Fatal("missing bounded Docker API probe")
+			}
+		})
+	}
+}
+
+// The pinned official ARM64 DinD image's config declares VOLUME /var/lib/docker.
+// containerd skips that anonymous image volume only for an exact CRI destination
+// match, not for a parent mount. Keep this expectation literal, independent of
+// dockerDataRoot, so moving BOTH the args and mount to a parent still fails.
+func TestDinDDataMountOverridesImageVolume(t *testing.T) {
+	const imageVolume = "/var/lib/docker"
+	for _, tc := range []struct{ name, configured, want string }{
+		{"default", "", "10Gi"},
+		{"configured", "5Gi", "5Gi"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := dindConfig()
+			cfg.DinD.DataSizeLimit = tc.configured
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			p := podSpec(podName("data-root"), "data-root", cfg.Image, cfg)
+			job, daemon := p.Spec.Containers[0], p.Spec.Containers[1]
+			shared := []core.VolumeMount{
+				{Name: "workspace", MountPath: "/shared"},
+				{Name: "workspace", MountPath: "/workspace"},
+				{Name: "docker-socket", MountPath: dockerSocketDir},
+			}
+			wantDaemon := append(slices.Clone(shared), core.VolumeMount{Name: "docker-data", MountPath: imageVolume})
+			if !reflect.DeepEqual(job.VolumeMounts, shared) || !reflect.DeepEqual(daemon.VolumeMounts, wantDaemon) {
+				t.Fatalf("mounts must override the image volume, retain shared paths and exclude /var/lib and /tmp: job=%+v dind=%+v", job.VolumeMounts, daemon.VolumeMounts)
+			}
+			roots := 0
+			for _, arg := range daemon.Args {
+				if strings.HasPrefix(arg, "--data-root=") {
+					roots++
+					if arg != "--data-root="+imageVolume {
+						t.Fatalf("data-root and image-volume mount diverged: %s", arg)
+					}
+				}
+			}
+			if roots != 1 {
+				t.Fatalf("expected exactly one fixed data-root, got %d", roots)
+			}
+			dataSize := resource.MustParse(tc.want)
+			socketSize := resource.MustParse("1Mi")
+			wantVolumes := map[string]core.VolumeSource{
+				"docker-data":   {EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &dataSize}},
+				"docker-socket": {EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &socketSize}},
+			}
+			for _, volume := range p.Spec.Volumes {
+				if want, ok := wantVolumes[volume.Name]; ok {
+					if !reflect.DeepEqual(volume.VolumeSource, want) {
+						t.Fatalf("%s must remain a separate capped disk emptyDir: %+v", volume.Name, volume.VolumeSource)
+					}
+					delete(wantVolumes, volume.Name)
+				}
+			}
+			if len(wantVolumes) != 0 {
+				t.Fatalf("missing data/socket volumes: %+v", wantVolumes)
 			}
 		})
 	}
