@@ -12,7 +12,6 @@ import (
 
 	pb "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
 	"forgejo-runner-kubernetes/internal/plugin"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"k8s.io/client-go/kubernetes"
@@ -70,7 +69,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	grpcServer := grpc.NewServer()
+	grpcServer := plugin.NewGRPCServer()
 	pb.RegisterBackendPluginServer(grpcServer, server)
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)

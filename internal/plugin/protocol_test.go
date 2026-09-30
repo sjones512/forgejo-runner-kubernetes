@@ -53,7 +53,7 @@ func TestStreamingProtocol(t *testing.T) {
 		}
 	}
 	listener := bufconn.Listen(1024 * 1024)
-	g := grpc.NewServer()
+	g := NewGRPCServer()
 	pb.RegisterBackendPluginServer(g, s)
 	go g.Serve(listener)
 	defer g.Stop()

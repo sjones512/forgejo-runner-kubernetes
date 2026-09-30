@@ -86,7 +86,7 @@ func testRunnerStepLifecycle(t *testing.T, cfg Config) {
 	}
 	obs := &observedRunnerServer{Server: s, firstCopyOutDone: make(chan struct{})}
 	l := bufconn.Listen(1 << 20)
-	grpcServer := grpc.NewServer()
+	grpcServer := NewGRPCServer()
 	pb.RegisterBackendPluginServer(grpcServer, obs)
 	go grpcServer.Serve(l)
 	defer grpcServer.Stop()
