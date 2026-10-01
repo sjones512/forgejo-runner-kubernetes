@@ -32,6 +32,9 @@ func TestStreamingProtocol(t *testing.T) {
 	s.execFn = func(_ context.Context, _ string, args []string, in io.Reader, out, errout io.Writer) error {
 		cmd := strings.Join(args, " ")
 		switch {
+		case slices.Equal(args, []string{"/usr/bin/env", "-0"}):
+			_, err := io.WriteString(out, "PATH=/bin\x00")
+			return err
 		case strings.Contains(cmd, "tar -xpf"):
 			uploaded, e = io.ReadAll(in)
 			return e

@@ -34,7 +34,6 @@ func jobConfig() (plugin.Config, error) {
 		StartupTimeout: 3 * time.Minute, CleanupTimeout: 30 * time.Second,
 		WorkspaceSizeLimit: os.Getenv("JOB_WORKSPACE_SIZE_LIMIT"), EphemeralStorageRequest: os.Getenv("JOB_EPHEMERAL_STORAGE_REQUEST"), EphemeralStorageLimit: os.Getenv("JOB_EPHEMERAL_STORAGE_LIMIT"),
 		AppArmorProfile: os.Getenv("JOB_APPARMOR_PROFILE"),
-		SecurityProfile: os.Getenv("JOB_SECURITY_PROFILE"), PermissionsImage: os.Getenv("JOB_PERMISSIONS_IMAGE"),
 		DinD: plugin.DinDConfig{
 			Enabled: dindEnabled == "true", Image: os.Getenv("JOB_DIND_IMAGE"),
 			CPURequest: os.Getenv("JOB_DIND_CPU_REQUEST"), CPULimit: os.Getenv("JOB_DIND_CPU_LIMIT"),

@@ -61,6 +61,10 @@ func TestDinDPodIsolationAndMounts(t *testing.T) {
 				t.Fatalf("containers: %+v", p.Spec.Containers)
 			}
 			job, daemon := p.Spec.Containers[0], p.Spec.Containers[1]
+			if p.Spec.SecurityContext.FSGroup == nil || *p.Spec.SecurityContext.FSGroup != 10001 || old.Spec.SecurityContext.FSGroup != nil {
+				t.Fatal("socket-only supplemental group policy")
+			}
+			old.Spec.SecurityContext.FSGroup = ptrInt64(10001)
 			if !reflect.DeepEqual(job.SecurityContext, old.Spec.Containers[0].SecurityContext) || !reflect.DeepEqual(p.Spec.SecurityContext, old.Spec.SecurityContext) || !reflect.DeepEqual(job.Resources, old.Spec.Containers[0].Resources) {
 				t.Fatal("DinD altered job security/resources")
 			}
@@ -315,6 +319,10 @@ func TestDinDStartReadinessAndCleanup(t *testing.T) {
 			// Job status FIRST must not bypass daemon readiness/failure.
 			p.Status.ContainerStatuses = []core.ContainerStatus{{Name: "job", Ready: tc.name != "job not ready"}, tc.state}
 			kube.CoreV1().Pods(cfg.Namespace).UpdateStatus(context.Background(), p, metav1.UpdateOptions{})
+			s.execFn = func(_ context.Context, _ string, _ []string, _ io.Reader, out, _ io.Writer) error {
+				_, err := io.WriteString(out, "PATH=/bin\x00")
+				return err
+			}
 			stream := &startCapture{ctx: context.Background()}
 			err = s.Start(&pb.StartRequest{EnvironmentId: p.Name}, stream)
 			if status.Code(err) != tc.want || tc.message != "" && !strings.Contains(err.Error(), tc.message) {
@@ -382,7 +390,11 @@ func TestDinDExecEnvironmentDefaults(t *testing.T) {
 	created, _ := s.Create(context.Background(), &pb.CreateRequest{Name: "exec"})
 	// A config reload must not strip defaults from an existing DinD Pod.
 	s.cfg.DinD.Enabled = false
-	s.execFn = func(_ context.Context, _ string, args []string, _ io.Reader, _, _ io.Writer) error {
+	s.execFn = func(_ context.Context, _ string, args []string, _ io.Reader, out, _ io.Writer) error {
+		if slices.Equal(args, []string{"/usr/bin/env", "-0"}) {
+			_, err := io.WriteString(out, "PATH=/bin\x00")
+			return err
+		}
 		if !slices.Contains(args, "DOCKER_HOST="+dockerHost) || !slices.Contains(args, "TMPDIR=/shared/tmp") || !slices.Contains(args, "HOME=/shared/workdir") || !slices.Contains(args, "INPUT_FETCH-DEPTH=0") {
 			t.Errorf("lost Exec defaults/Action env: %q", args)
 		}

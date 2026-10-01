@@ -45,7 +45,7 @@ func commandArgsWithDefaults(r *pb.ExecRequest, defaults map[string]string) ([]s
 	// drop non-identifier keys (e.g. INPUT_FETCH-DEPTH) on startup.
 	args := []string{"/usr/bin/env", "-i", "--", defaultPath, "/bin/sh", "-c",
 		`mkdir -p -- "$1" && cd -- "$1" && shift && exec /usr/bin/env -i -- "$@"`, "forgejo", wd, defaultPath}
-	// Keep the legacy writable fallback when no image/default/Runner HOME is
+	// Supply a writable shared fallback when no image/default/Runner HOME is
 	// supplied. This does not synthesize a passwd/NSS account for numeric UIDs.
 	// Both absent and explicitly empty HOME retain their distinct semantics.
 	if _, ok := env["HOME"]; !ok {

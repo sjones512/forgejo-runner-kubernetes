@@ -1,118 +1,79 @@
-# Operator job identity/security profiles (v0.1.0-alpha.11)
+# Ordinary image-native jobs (unreleased)
 
-This prerelease implements **job profiles only**, not workflow services. The existing default remains compatible. Publication was separately authorized after local implementation review; deployment and real-cluster acceptance remain pending. Review [executor-model research](executor-model.md) for pinned Runner/Kubernetes/Node sources and supplied integration evidence.
+One job model: **run the selected image as an ordinary non-privileged Kubernetes container**. This pre-alpha plugin has no compatibility commitment to the former fixed UID. There are no job security profiles, custom capability lists, permissions images/init helpers, or NSS/passwd fixes. Release preparation is paused for implementation review; no new tag/release or cluster deployment is authorized. [Executor-model research](executor-model.md) records the source evidence and deferred service work.
 
-## Configuration
+## Identity, capabilities and outer boundaries
 
-| Plugin Deployment setting | Behavior |
-| --- | --- |
-| `JOB_SECURITY_PROFILE` unset/empty or `fixed` | Default compatibility profile: job UID 10001, runAsNonRoot true, unspecified primary GID, capabilities drop ALL. No permission helper or image-env discovery. |
-| `JOB_SECURITY_PROFILE=image` | Honor selected image USER/default UID and primary GID: no runAsUser/runAsGroup/runAsNonRoot on Pod or job container. Keep drop ALL. Root identity is allowed if image/admission allow it, but ordinary package-manager capabilities are **not** granted. |
-| `JOB_SECURITY_PROFILE=image-ci` | Same image identity, but operator explicitly grants the bounded CI capability set below. It does not force UID 0, infer policy from USER, or make the job privileged. Use a deliberately root-capable image for root package setup. |
-| `JOB_PERMISSIONS_IMAGE` | Required for `image`/`image-ci`: operator-owned standard Linux helper pinned as `name@sha256:<64 lowercase hex>`. Must provide `/bin/sh`, mkdir, chgrp and chmod and support the job architecture. No default/mutable helper image. Forbidden with the fixed profile to avoid silently ignored configuration. |
+The plugin emits **no runAsUser, runAsGroup, runAsNonRoot or capabilities field** on the job or Pod. Image USER/default-root identity and the container runtime/admission's ordinary capability baseline apply. Root identity does not imply privileged execution. There is no instance security mode or workflow privilege/securityContext passthrough; per-exec user and workflow cap_add remain rejected.
 
-Unknown/case-mismatched/whitespace profile values, missing/unpinned/invalid helper images and contradictory fixed+helper configuration fail plugin startup. Profiles are instance-wide operator policy; workflow image selection, env, container options and backend options cannot change them. There is no Kubernetes securityContext passthrough.
+Retained boundaries:
 
-Example opt-in (helper index verified to contain amd64 and ARM64; local execution tested on amd64 only):
+- Explicit job `privileged: false` and `allowPrivilegeEscalation: false` (no-new-privileges).
+- Pod RuntimeDefault seccomp and existing operator-selected **job-only** AppArmor; unset AppArmor remains unspecified. The supplied trusted environment's accepted Unconfined override is not a plugin default.
+- No host namespaces, host paths/runtime sockets, shared process namespace or ServiceAccount token.
+- Existing CPU/memory/ephemeral-storage budgets, capped disk emptyDirs, restartPolicy Never and Runner lifetime deadline.
+- Required NetworkPolicy isolation: only the trusted Runner may reach unauthenticated plugin gRPC. Ordinary Pod network access still needs operator policy.
 
-```yaml
-env:
-  - name: JOB_SECURITY_PROFILE
-    value: image
-  - name: JOB_PERMISSIONS_IMAGE
-    value: docker.io/library/busybox@sha256:5cec3fc171c87218698e85a52af7087de727372aae264a787b8112901a5b0092
-  # Only where the operator has already accepted this job-container override:
-  - name: JOB_APPARMOR_PROFILE
-    value: unconfined
-```
+**fsGroup 10001 is emitted only with fixed DinD**, for its group-accessible Unix socket; it does not change the image's primary GID or create an account. Ordinary workspace emptyDir writes do not require a forced group. Fixed DinD retains its existing daemon-only privileged/root/Unconfined fields, image pin, args, probes and budgets.
 
-To preserve the default, leave **both** new settings unset. To opt into bounded package/user setup, explicitly choose `image-ci`, not just an image with USER=root. For a non-root image needing only its correct identity, choose `image`; it receives no extra capabilities. Selecting `image-ci` grants its policy regardless of the declared UID and can confer user-switching powers even with a non-root image, subject to runtime capability handling. Do not treat it as an identity-only switch.
+No plugin-defined capability baseline is imposed or promised. Runtime defaults can include capabilities such as NET_RAW or MKNOD that the rejected custom profile excluded; admission/runtime policy remains authoritative. Ordinary non-privileged execution is not a sandbox against untrusted images or kernel vulnerabilities. Restricted PSA can reject root/unset non-root identity, default capabilities or other fields; this plugin does not evade admission.
 
-## Security and compatibility
-
-All profiles retain Pod fsGroup **10001**, RuntimeDefault seccomp, existing job AppArmor selection, job resource/storage budgets, ephemeral volumes, restartPolicy Never, no ServiceAccount token, no hostPath/host namespaces and no privileged job. The compatibility UID/non-root restrictions moved from Pod to **job-container** securityContext with the same effective job identity. Neither legacy nor image profiles impose a job primary GID; fsGroup is a supplemental storage/socket group.
-
-AppArmor remains unspecified unless configured. The supplied trusted environment's accepted Unconfined job override is honored, **not made a default**. Helper AppArmor is unspecified and helper seccomp inherits Pod RuntimeDefault. Fixed DinD retains its existing explicit privileged/root/daemon-only Unconfined profiles. No profile relaxes job seccomp or the trusted-Runner-only unauthenticated gRPC boundary.
-
-The native profiles introduce a UID-0 permission init helper, even for a non-root job image; therefore they require admission permitting that helper. Restricted PSA can reject them. The supplied Privileged-PSA trusted CI namespace admits a wider envelope; it does not automatically make ordinary jobs privileged. Admission may impose additional identity/security constraints: validate actual runtime credentials, not just intended fields.
-
-### Bounded `image-ci` capabilities
-
-Drop **ALL**, then add exactly:
-
-```text
-CHOWN DAC_OVERRIDE FOWNER FSETID SETUID SETGID SETFCAP SYS_CHROOT KILL
-```
-
-Rationale, based on [Moby's pinned conventional defaults](https://github.com/moby/moby/blob/464cd50c3d9e92877d56940ea160de6fca7bea23/daemon/pkg/oci/caps/defaults.go), [Linux capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html) and [dpkg's chroot behavior](https://manpages.debian.org/bookworm/dpkg/dpkg.1.en.html):
-
-- CHOWN/DAC_OVERRIDE/FOWNER/FSETID: package file ownership, access, modes and set-ID preservation.
-- SETUID/SETGID: ordinary account switching, including package-manager helper users.
-- SETFCAP: package-installed file capability metadata. No-new-privileges/bounding policy still constrain later execution.
-- SYS_CHROOT: package-maintenance chroots; no host root is mounted.
-- KILL: ordinary **cross-UID child supervision** after switching users. A local control gets EPERM without it and succeeds with it. This is not a containerd/AppArmor workaround; it neither disables nor overrides an LSM denial, and is not added to `fixed` or `image`.
-
-No SYS_ADMIN, NET_ADMIN, SYS_PTRACE, NET_RAW, MKNOD, SETPCAP, AUDIT_WRITE, NET_BIND_SERVICE, wildcard/default capability inheritance or privileged job. Existing no-new-privileges remains in force. This is a bounded conventional CI profile, not a guarantee that every package, daemon or file-capability binary works. Do not broaden it speculatively when a package requests unavailable operations.
-
-Local standard Debian/Node testing under the **exact generated set**, no-new-privileges and Docker default seccomp passed: apt update/install `hello`, ownership/mode changes, switching to node, chroot, and signalling a switched-UID child. Recorded CapEff/CapBnd `00000000800400fb`, NoNewPrivs 1, Seccomp 2. This does not prove enforcement under the actual cluster's runtime/seccomp configuration. No application tests or CI image were changed/built.
+Local standard Debian/Node tests used **no cap-add/cap-drop**, no-new-privileges and Docker default seccomp. Apt update/install `hello`, chown/chmod, switching to node, chroot and signalling a switched-UID child passed. Observed root CapEff/CapBnd `00000000a80425fb`, NoNewPrivs 1, Seccomp 2. This records that Docker runtime, **not a contractual Kubernetes capability list** or proof of the target RuntimeDefault seccomp/capability policy. Package/daemon operations requiring unavailable privileges can still fail; do not add speculative profiles to work around them.
 
 ## Image environment and HOME
 
-The fixed profile keeps previous behavior: Start reports only plugin defaults and fixed PATH; Exec clears inherited env and supplies HOME=/shared/workdir only when absent. Explicit Runner HOME, including an empty value, is preserved. No image-env probe is introduced for this profile.
+Because Exec uses `env -i`, retaining image identity alone would lose meaningful image settings. Start and every Exec therefore directly execute **`/usr/bin/env -0`** in `job` to capture its effective inherited image/Pod environment, without running application ENTRYPOINT or querying registries. Discovery is bounded to **30 seconds / 64KiB**, validates NUL framing/entries/duplicate keys, discards probe stderr and reports no raw environment/transport detail in errors. Images must provide an env utility supporting `-0`, in addition to existing shell/tar/mkdir/sleep requirements.
 
-For `image`/`image-ci`, Start executes **only `/usr/bin/env -0`** in `job` after helper/job/DinD readiness. It does not run the image application entrypoint or query registries. It discovers the effective inherited image/Pod environment with NUL framing, including non-shell keys and values containing newlines/equals. Images need an env utility supporting `-0`. Discovery is bounded to **30 seconds / 64KiB**, rejects malformed/duplicate entries, discards probe stderr and reports no raw environment/transport detail in errors.
+Order:
 
-Order for command defaults:
+1. Effective inherited image/runtime environment.
+2. Stored plugin-owned DOCKER_HOST/TMPDIR defaults when fixed DinD is present.
+3. Conventional PATH and HOME=/shared/workdir fallbacks **only when absent**.
+4. Explicit Runner Exec env wins, including empty values.
 
-1. Captured image/runtime environment.
-2. Stored plugin-owned fixed-DinD DOCKER_HOST/TMPDIR defaults, if present.
-3. PATH fallback only if absent; HOME=/shared/workdir only if absent.
-4. Explicit Runner Exec env wins, **including empty values**.
+Start advertises base defaults in StartComplete.image_env. Exec rediscovers them so plugin restart does not require a volatile cache or secret annotation. The plugin does not print/persist the environment; it sends it over the trusted Runner RPC contract. Kubernetes exec argv/environment can be visible to cluster administrators. Stored Pod daemon defaults, not the current server config, govern a live environment.
 
-Native Start advertises those base defaults in StartComplete.image_env. Exec rediscovers them (one bounded probe per call) so clearing env does not lose meaningful image settings, and plugin restart/config change does not depend on a volatile cache or secret Pod annotation. Copy operations remain on the same job identity and existing image tools. Env is not printed or persisted by the plugin; it is sent over the existing trusted Runner RPC contract. Image HOME may point outside shared storage and is the image's responsibility to make usable.
+Pinned Runner's image-env merge treats existing **empty** workflow values as unset and composes PATH specially. The plugin preserves empty intent where it reaches Exec but cannot recover intent Runner already discarded before serializing that request.
 
-Pinned Runner's image-env merge treats an existing **empty** workflow value as unset and composes PATH specially. The plugin honors empty values where they reach Exec, but cannot reconstruct intent that Runner already discarded before serializing that request. Do not claim perfect workflow-empty precedence beyond the wire.
+HOME does **not** create a passwd/NSS account. Registered root/named/numeric image accounts resolve their passwd home when a child removes HOME. An image's deliberately unregistered numeric UID can still produce `uv_os_homedir ENOENT` in a sanitized child. Absent HOME gets the writable shared fallback for normal commands; explicit empty HOME remains empty. Images must make their declared HOME usable. No fabricated account, application workaround or promised fix for the specific supplied failure is introduced.
 
-HOME does **not** create a passwd/NSS account. Registered root/named/numeric image identities can resolve their passwd home when a child removes HOME. Legacy UID 10001 or an image's deliberately unregistered numeric UID can still produce `uv_os_homedir ENOENT` in a sanitized child. That is an honest identity/image limitation, not hidden by a fabricated account. Local diagnostics prove this; the specific supplied application failure is **not declared fixed** until separate integration confirms it.
+The executor still replaces image ENTRYPOINT/CMD with its long-lived CI command and uses Runner argv/workdir under /shared or /workspace. It does not implement full application startup/WORKDIR semantics, missing tools, arbitrary Docker options, container actions or per-exec user switching.
 
-The executor still replaces ENTRYPOINT/CMD with the long-lived CI command and uses Runner argv/workdir under /shared or /workspace. It does not provide full image application startup/WORKDIR semantics, per-exec user switching, missing tools, arbitrary Docker options or container actions.
+## Existing volumes and fixed DinD
 
-## Shared workspace and fixed DinD
+No permission preparation/hardening is added. Kubernetes emptyDir starts with a broad **0777** root. With fixed DinD, fsGroup supplies group ownership/permissions and setgid, so roots can be root:10001 **02777**; fsGroup does not remove world-write. These volumes are private to one ephemeral job Pod, not shared across jobs or mounted from the host. World-write is a known within-Pod security characteristic to revisit separately if warranted, not group-private hardening.
 
-Legacy gets the same capped disk emptyDir shape and no new helper/mode changes. Its volume root can remain kubelet's broad 02777; fsGroup does not remove world permissions.
+The unchanged job startup creates /shared/{act,toolcache,workdir,tmp} as its effective identity, which also runs Exec and tar transfers. Both aliases share one capped disk emptyDir. Workload umask/chmod and ownership govern children; arbitrary cross-UID writes into another process's restrictive directories are not guaranteed.
 
-Native profiles run a **separate operator-pinned** `permissions` init container before workloads. It mounts only workspace at /shared and, if fixed DinD is enabled, its existing socket volume at /run/forgejo-docker. It normalizes these fresh roots and /shared/{act,toolcache,workdir,tmp} to root:10001 **2770**, using group membership rather than capabilities. It does not recursively chmod job data, modify passwd, touch Docker data or use the workflow-selected image as helper.
+Fixed `JOB_DIND_ENABLED` remains operator-only/default-off: same pinned daemon, private socket root:10001 **0660**, data root /var/lib/docker, bounded resources/storage/readiness, shared binds/private-/tmp semantics, DOCKER_HOST/TMPDIR defaults and explicit Runner override precedence. A non-privileged job accesses the daemon via supplemental group 10001. Deliberately dropping supplemental groups can lose socket access. Controlling the privileged nested daemon still creates an elevated kernel/runtime attack surface. No workflow services or DinD migration.
 
-Helper: UID 0, primary GID 10001, no escalation, drop ALL, no privilege/token/host access. Requests **10m CPU / 16Mi memory / 1Mi ephemeral**, limits **100m / 64Mi / 64Mi**. It shares Pod deadline/startup timeout and ephemeral cleanup. Pull/config/exit failures block Start; required helper success precedes StartComplete. No alpha EmptyDir mode feature is required.
+## Templates, restart and upgrade
 
-Both aliases remain one capped storage volume. Group 10001 enables root/named/arbitrary numeric users to write without world-write and reach fixed DinD's root:10001 mode-0660 socket. Setgid supplies group inheritance, not universal group-write despite arbitrary workload umasks/chmod. A process that explicitly drops supplemental groups may lose socket/shared-group access; normal plugin-controlled job startup does not drop them. New package/user-switching commands must retain suitable groups when they need shared paths.
+New Pods have a deterministic full **job-template** SHA256 over their intended PodSpec, before API defaulting/remaining Runner lifetime. Job image/security/resources/storage/AppArmor, conditional fsGroup and daemon policy participate. There is no profile annotation, env-policy mode/version or compatibility branch. Conflicting/unhashed Create retries fail with a generic template conflict, without secret/spec dumps; the plugin does not patch/delete a conflicting live environment.
 
-`JOB_DIND_ENABLED` remains unchanged: one fixed daemon per job when enabled, same image pin, args, resource/data caps, probes, exact data root, shared binds/private-/tmp contract, default DOCKER_HOST and explicit Runner override precedence. Only the job/helper profile changes. Ordinary job privilege is never needed to access its socket. No requested services or DinD migration.
+This is a deliberate pre-alpha default change, not an upgrade preserving UID 10001. Drain/remove active old jobs before deployment; do not depend on old live environments being continued compatibly. Later RPCs use the actual stored Pod and one universal environment behavior. No fixed-UID legacy handler or automatic NSS repair exists.
 
-## Retry and restart
+## Validation and separate acceptance
 
-Every newly created Pod records the normalized profile and a deterministic full **job-template** SHA256; fixed DinD retains its annotation too. Normalized profile and explicit env-policy version, identity, capability set, helper image/command/resources/mounts, job AppArmor/storage/resources and daemon policy participate. The hash excludes API defaulting and remaining Runner lifetime; unset and explicit `fixed` produce identical templates.
+Full `go test ./...`, `go test -race ./...`, `go vet ./...`, twenty focused race repetitions, formatting/diff and diagnostic syntax checks passed, as did the local container suite and a static Linux ARM64 cross-build. Runner v13.2.0 and the imported/generated protocol are unchanged (proto SHA256 `961fc5fc541c5c79f5502632d9f6dd3daa110ecfd55b9fbf697778b873367f79`).
 
-Conflicting retries return AlreadyExists with a generic template conflict, not a secret/spec dump. Pre-profile Pods have no new hash: **Create retries fail safe**, including under the fixed profile; drain outstanding jobs before upgrade/reconfiguration where possible. Their later Start/Exec/copy/Remove RPCs remain supported as legacy (Start/Exec verify the missing-profile Pod's actual fixed-UID/non-root shape rather than treating a stripped native Pod as legacy). New Pods' later RPCs use the **stored profile and defaults**, never current config to reinterpret identity. Unknown stored profiles block Start/Exec; explicit Remove remains available. The plugin does not patch/delete a live conflicting environment.
+Unit tests cover intended ordinary Pod fields, conditional socket group, no init/helper, preserved resources/mounts/daemon, env precedence/framing/non-shell keys/empty values/redaction/limits/cancellation, stored daemon defaults/restart, template conflicts and unchanged service rejection. Real-gRPC/bufconn virtual-time quiet/silent/nonzero/cancellation/deadline tests retain old **transport-policy** negative controls, not old identity modes.
 
-## Local validation and separate acceptance
-
-Unit/protocol tests cover default and all profiles, exact fields/caps, helper bounds/gates, env precedence/framing/cancellation/timeout/size limits, stored-profile restart behavior, retry conflicts, existing DinD and service rejection. Full `go test ./...`, `go test -race ./...`, `go vet ./...`, twenty focused race repetitions, formatting/diff and standalone diagnostic syntax checks passed, as did the optional local Docker suite and a static Linux ARM64 cross-build. The imported/generated pinned Runner protocol is unchanged (proto SHA256 `961fc5fc541c5c79f5502632d9f6dd3daa110ecfd55b9fbf697778b873367f79`). Native quiet success/silence/nonzero/cancellation/deadline uses real gRPC/bufconn and virtual time, alongside unchanged legacy controls.
-
-Optional local diagnostics (Docker default context must be a local Unix endpoint):
+Optional local diagnostic:
 
 ```sh
 EXECUTOR_IDENTITY_CONTAINER_TESTS=1 go test -race ./internal/plugin -run '^TestIdentityContainers$' -count=1 -v
 ```
 
-This runs generated helper/Exec argv against standard pinned BusyBox/Node images: legacy UID, native root, named/numeric registered accounts, unregistered numeric UID, and CI-root. Each checks HOME/sanitized-child NSS, HOME writability, both aliases and a **fake** Docker socket. Named/numeric Docker --user emulates runtime credentials, not proof of actual Kubernetes image USER. A separate local package subtest uses the generated capability list and public apt mirrors. No Kubernetes or actual dockerd validation occurs here.
+Passed root, named node, registered numeric1000 and arbitrary UID23456/GID34567, **each with DinD off and on**. No job cap-add/cap-drop or forced group without DinD. Tests run generated long-lived job/Exec argv and streaming CopyIn/CopyOut RPCs (bufconn → Docker exec), checking archive payload/ownership and opposite /shared↔/workspace aliases; HOME present/absent/empty and sanitized-child NSS; and actual pinned Docker29.8.1 `/info` through its observed root:10001 mode-0660 socket. A separate ordinary root package/chown/user-switch/chroot/supervision case passed with runtime defaults. Disposable containers/volumes are cleaned up.
 
-**Deployment requires separate authorization.** Use the immutable v0.1.0-alpha.11 image digest recorded in its GitHub prerelease, then perform the following acceptance plan:
+Docker named volumes start 0755/root:root, unlike kubelet emptyDir, so test-only setup models existing **0777**, or **02777/root:10001 with DinD**, roots before workloads. It does not create staging directories or implement production permission preparation. Docker --user and --group-add model image-resolved credentials/fsGroup, **not real Kubernetes image USER/fsGroup**, ARM64 execution, target runtime policy, storage-cap accounting or build/cache/publication. No custom CI image is built. The specific supplied homedir failure remains unattributed pending real integration.
 
-1. Drain/reconcile old environments; deploy the exact new plugin digest. Keep namespace, storage, fixed DinD and accepted `JOB_APPARMOR_PROFILE=unconfined` settings otherwise unchanged.
-2. Choose `image` plus pinned helper for the first identity test; use `image-ci` only when its elevated policy is intended. Capture actual Pod/job/helper UID/GID/groups, capability/no-new-privileges/seccomp state, selected image/digest, HOME presence and passwd/NSS result. Confirm no token/host access/privileged job and helper 2770 modes.
-3. Rerun existing pi-wright `ci.yaml` **unchanged**, capture the previously failing child's Node/libuv/euid/HOME/NSS and complete error. Determine whether `uv_os_homedir ENOENT` disappears and record remaining process-test failures. Do not change application tests, fabricate passwd or add output heartbeats.
-4. Separately exercise standard images with root, named USER, numeric USER with account, and unregistered numeric USER on ARM64. Confirm native USER is actually honored, both aliases/HOME behavior, normal Actions/transfers/quiet/nonzero/cancellation and cleanup. Missing-account/no-HOME failure should remain an explicit image limitation.
-5. If enabling `image-ci`, separately install a small ordinary OS package and test ownership/user switching/supervision with the exact bounded set and unchanged security profiles. No application/browser-specific workaround. Capture failures before contemplating any capability change.
-6. Confirm publication jobs' **existing fixed DinD** readiness/socket/defaults, native build/load and direct exact-image smoke, registry cache/publication and capped data-root accounting still work. Check cleanup on success/failure/cancellation; test profile/helper conflicts and plugin restart. Do not implement/request workflow services.
-7. Preserve and test job-to-plugin ingress denial. Only after review and separate acceptance decide any rollout; publication does not establish real integration success.
+**STOP: do not release until this simplified implementation is reviewed.** After separate release/deployment authorization:
+
+1. Drain active old jobs and deploy the newly authorized immutable plugin digest. Preserve namespace/storage/fixed DinD and accepted job AppArmor settings otherwise; there is no security-profile/helper configuration.
+2. On ARM64, exercise images declaring root/default USER, named USER, registered numeric USER and arbitrary numeric USER. Capture actual euid/egid/groups, capabilities/no-new-privileges/seccomp, selected image/runtime digest, HOME presence and NSS result; verify no privileged job/init/token/host access. Check fsGroup absent without DinD and 10001 with it, recording actual emptyDir/socket modes.
+3. Confirm HOME present/absent/empty, sanitized-child NSS limitations, both workspace aliases, CopyIn/CopyOut, Actions, quiet/nonzero/cancellation and explicit cleanup. Test restart/template conflicts without attempting to migrate live old jobs.
+4. Rerun existing pi-wright `ci.yaml` **unchanged**; capture the previously failing child's Node/libuv/euid/HOME/NSS/error. Only real integration may attribute or declare that homedir failure fixed. No application test edits, synthetic passwd or heartbeat wrappers.
+5. Separately install a small ordinary OS package, chown and switch users under the actual runtime baseline with unchanged no-new-privileges/seccomp/AppArmor. Record failures; do not infer a need for modes/custom capabilities from speculative compatibility.
+6. Reconfirm existing fixed-DinD socket/readiness/build/load/exact-image smoke/cache/publication/storage accounting and cleanup; preserve job-to-plugin ingress denial. Services remain rejected and deferred. Publication alone is not integration acceptance.

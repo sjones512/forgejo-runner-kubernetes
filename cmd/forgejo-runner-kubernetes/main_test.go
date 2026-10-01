@@ -5,27 +5,6 @@ import (
 	"testing"
 )
 
-func TestJobIdentityEnvironment(t *testing.T) {
-	pinned := "busybox@sha256:" + strings.Repeat("a", 64)
-	for _, tc := range []struct{ profile, helper, want string }{
-		{"", "", ""}, {"fixed", "", ""}, {"image", pinned, ""}, {"image-ci", pinned, ""},
-		{"unknown", "", "JOB_SECURITY_PROFILE"}, {"image", "", "JOB_PERMISSIONS_IMAGE"},
-		{"image-ci", "busybox:1.37", "JOB_PERMISSIONS_IMAGE"}, {"fixed", pinned, "JOB_PERMISSIONS_IMAGE"},
-	} {
-		t.Run(tc.profile+tc.want, func(t *testing.T) {
-			t.Setenv("JOB_SECURITY_PROFILE", tc.profile)
-			t.Setenv("JOB_PERMISSIONS_IMAGE", tc.helper)
-			cfg, err := jobConfig()
-			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
-				t.Fatalf("want %q, got %v", tc.want, err)
-			}
-			if err == nil && (cfg.SecurityProfile != tc.profile || cfg.PermissionsImage != tc.helper) {
-				t.Fatal("identity environment not applied")
-			}
-		})
-	}
-}
-
 func TestJobDinDEnvironment(t *testing.T) {
 	for _, tc := range []struct {
 		name string

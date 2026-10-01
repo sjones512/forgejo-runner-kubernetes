@@ -36,7 +36,7 @@ func TestPodSpec(t *testing.T) {
 	if p.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation == nil || *p.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation {
 		t.Fatal("privilege escalation enabled")
 	}
-	if *p.Spec.Containers[0].SecurityContext.RunAsUser != 10001 || p.Spec.SecurityContext.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault {
+	if p.Spec.Containers[0].SecurityContext.RunAsUser != nil || p.Spec.Containers[0].SecurityContext.RunAsNonRoot != nil || p.Spec.Containers[0].SecurityContext.Capabilities != nil || p.Spec.SecurityContext.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault {
 		t.Fatal("pod security context")
 	}
 	if len(p.Spec.Containers[0].Resources.Limits) != 3 || len(p.Spec.Containers[0].Resources.Requests) != 3 {
@@ -100,9 +100,9 @@ func TestJobAppArmorPodSpec(t *testing.T) {
 				}
 			}
 			if pc.SeccompProfile == nil || pc.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault || security.SeccompProfile != nil ||
-				pc.RunAsNonRoot != nil || pc.RunAsUser != nil || security.RunAsNonRoot == nil || !*security.RunAsNonRoot || security.RunAsUser == nil || *security.RunAsUser != 10001 || pc.FSGroup == nil || *pc.FSGroup != 10001 ||
-				security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation || security.Privileged != nil && *security.Privileged ||
-				security.Capabilities == nil || !slices.Equal(security.Capabilities.Drop, []core.Capability{"ALL"}) || len(security.Capabilities.Add) != 0 ||
+				pc.RunAsNonRoot != nil || pc.RunAsUser != nil || pc.RunAsGroup != nil || security.RunAsNonRoot != nil || security.RunAsUser != nil || security.RunAsGroup != nil || pc.FSGroup != nil ||
+				security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation || security.Privileged == nil || *security.Privileged ||
+				security.Capabilities != nil ||
 				pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
 				t.Fatalf("other security controls changed: pod=%+v container=%+v", pc, security)
 			}

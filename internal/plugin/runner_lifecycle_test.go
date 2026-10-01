@@ -55,6 +55,9 @@ func testRunnerStepLifecycle(t *testing.T, cfg Config) {
 	s.execFn = func(ctx context.Context, _ string, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		cmd := strings.Join(args, " ")
 		switch {
+		case cmd == "/usr/bin/env -0":
+			_, err := io.WriteString(stdout, "PATH=/bin\x00")
+			return err
 		case strings.Contains(cmd, "tar -xpf"):
 			_, err := io.Copy(io.Discard, stdin)
 			return err

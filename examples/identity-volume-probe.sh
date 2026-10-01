@@ -17,10 +17,11 @@ cleanup() {
 docker --context default volume create "$volume" >/dev/null
 trap cleanup EXIT
 common=(--network none --cap-drop ALL --security-opt no-new-privileges --group-add 10001)
-# Emulate a proposed group-owned directory. This is not kubelet fsGroup setup.
+# Model existing emptyDir+fsGroup roots (02777/root:10001), not new hardening.
+# Docker's default volume permissions differ; this is not a real kubelet test.
 docker --context default run --rm "${common[@]}" --user 0:0 \
   --mount "type=volume,src=$volume,dst=/shared" "$image" \
-  sh -c 'chgrp 10001 /shared && chmod 2770 /shared'
+  sh -c 'chgrp 10001 /shared && chmod 2777 /shared'
 server=$(docker --context default run -d --rm "${common[@]}" --user 0:0 \
   --mount "type=volume,src=$volume,dst=/shared" "$image" node -e '
 const fs=require("fs");
@@ -44,7 +45,7 @@ assert.equal(fs.readFileSync("/workspace/"+name,"utf8"),"shared");
 fs.writeFileSync("/workspace/"+name,"workspace");
 assert.equal(fs.readFileSync("/shared/"+name,"utf8"),"workspace");
 const dir=fs.statSync("/shared"),sock=fs.statSync("/shared/probe.sock");
-assert.equal(dir.mode&0o7777,0o2770);
+assert.equal(dir.mode&0o7777,0o2777);
 assert.equal(sock.mode&0o777,0o660);
 assert.equal(sock.gid,10001);
 const c=net.connect("/shared/probe.sock"); let got="";
