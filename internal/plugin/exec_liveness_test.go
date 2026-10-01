@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -30,6 +31,7 @@ func TestExecOutputLiveness(t *testing.T) {
 	for _, tc := range []struct {
 		name                                               string
 		start, periodic, delayed, cancel, deadline, legacy bool
+		image                                              bool
 		exit                                               int
 		duration                                           time.Duration
 	}{
@@ -40,6 +42,11 @@ func TestExecOutputLiveness(t *testing.T) {
 		{name: "delayed stdout and stderr", delayed: true},
 		{name: "explicit cancellation", cancel: true},
 		{name: "explicit deadline", deadline: true},
+		{name: "image quiet success", image: true, start: true},
+		{name: "image fully silent success", image: true, duration: 10 * time.Minute},
+		{name: "image quiet nonzero", image: true, exit: 23},
+		{name: "image cancellation", image: true, cancel: true},
+		{name: "image deadline", image: true, deadline: true},
 		{name: "legacy default rejects quiet stream", start: true, legacy: true},
 		{name: "legacy default rejects fully silent success", duration: 10 * time.Minute, legacy: true},
 		{name: "legacy default rejects quiet nonzero", exit: 23, legacy: true},
@@ -49,6 +56,9 @@ func TestExecOutputLiveness(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				cfg := testConfig()
+				if tc.image {
+					cfg = imageConfig(profileImage)
+				}
 				s, err := New(cfg, fake.NewSimpleClientset(), &rest.Config{})
 				if err != nil {
 					t.Fatal(err)
@@ -58,7 +68,11 @@ func TestExecOutputLiveness(t *testing.T) {
 					duration = 180 * time.Second
 				}
 				started, finished := make(chan struct{}), make(chan error, 1)
-				s.execFn = func(ctx context.Context, _ string, _ []string, stdin io.Reader, stdout, stderr io.Writer) (result error) {
+				s.execFn = func(ctx context.Context, _ string, args []string, stdin io.Reader, stdout, stderr io.Writer) (result error) {
+					if slices.Equal(args, []string{"/usr/bin/env", "-0"}) {
+						_, err := io.WriteString(stdout, "HOME=/home/node\x00PATH=/image/bin\x00")
+						return err
+					}
 					defer func() { finished <- result }()
 					if stdin != nil {
 						return errors.New("unexpected stdin")

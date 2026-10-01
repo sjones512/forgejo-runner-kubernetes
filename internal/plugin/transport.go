@@ -39,15 +39,15 @@ func commandArgsWithDefaults(r *pb.ExecRequest, defaults map[string]string) ([]s
 	if !safePath(wd) {
 		return nil, status.Error(codes.InvalidArgument, "workdir outside workspace")
 	}
-	defaultPath := "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	defaultPath := "PATH=" + defaultExecPath
 	// The shell is only for setting cwd. Pass environment assignments as
 	// positional arguments to the final env invocation: some /bin/sh versions
 	// drop non-identifier keys (e.g. INPUT_FETCH-DEPTH) on startup.
 	args := []string{"/usr/bin/env", "-i", "--", defaultPath, "/bin/sh", "-c",
 		`mkdir -p -- "$1" && cd -- "$1" && shift && exec /usr/bin/env -i -- "$@"`, "forgejo", wd, defaultPath}
-	// Numeric UID 10001 has no passwd entry; without HOME, Node's os.homedir()
-	// fails before checkout can initialize the repository. The Pod creates this
-	// writable directory at startup. Preserve an explicit Runner HOME override.
+	// Keep the legacy writable fallback when no image/default/Runner HOME is
+	// supplied. This does not synthesize a passwd/NSS account for numeric UIDs.
+	// Both absent and explicitly empty HOME retain their distinct semantics.
 	if _, ok := env["HOME"]; !ok {
 		args = append(args, "HOME="+workspace+"/workdir")
 	}
@@ -118,7 +118,15 @@ func (s *Server) Exec(r *pb.ExecRequest, stream grpc.ServerStreamingServer[pb.Ex
 	if err != nil {
 		return err
 	}
-	argv, err := commandArgsWithDefaults(r, podExecDefaults(p))
+	// Reject invalid requests before any image-environment probe is executed.
+	if _, err := commandArgs(r); err != nil {
+		return err
+	}
+	defaults, err := s.executionDefaults(stream.Context(), p)
+	if err != nil {
+		return err
+	}
+	argv, err := commandArgsWithDefaults(r, defaults)
 	if err != nil {
 		return err
 	}

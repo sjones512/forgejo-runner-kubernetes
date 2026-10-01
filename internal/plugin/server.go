@@ -48,6 +48,8 @@ type Config struct {
 	EphemeralStorageRequest string
 	EphemeralStorageLimit   string
 	AppArmorProfile         string // Empty leaves AppArmor unspecified; otherwise runtime-default, unconfined or localhost:<name>.
+	SecurityProfile         string // Empty/fixed preserves legacy identity; image/image-ci opt into image USER and env.
+	PermissionsImage        string // Operator-owned digest-pinned helper, required only for image/image-ci.
 	DinD                    DinDConfig
 }
 
@@ -59,6 +61,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if _, err := c.appArmorProfile(); err != nil {
+		return err
+	}
+	if err := c.validateIdentity(); err != nil {
 		return err
 	}
 	return c.DinD.validate()
@@ -200,7 +205,7 @@ func (s *Server) Create(ctx context.Context, r *pb.CreateRequest) (*pb.CreateRes
 	if apierrors.IsAlreadyExists(err) {
 		p, err = s.get(ctx, id)
 		if err == nil && !sameEnvironment(p, obj) {
-			return nil, status.Error(codes.AlreadyExists, "environment name collision or image/DinD configuration mismatch")
+			return nil, status.Error(codes.AlreadyExists, "environment name collision or job template configuration mismatch")
 		}
 	}
 	if err != nil {
@@ -215,8 +220,15 @@ func (s *Server) Create(ctx context.Context, r *pb.CreateRequest) (*pb.CreateRes
 }
 func sameEnvironment(p, expected *core.Pod) bool {
 	if p.Annotations["forgejo.org/runner-name"] != expected.Annotations["forgejo.org/runner-name"] ||
-		p.Annotations[dindTemplate] != expected.Annotations[dindTemplate] || len(p.Spec.Containers) != len(expected.Spec.Containers) {
+		p.Annotations[jobTemplate] == "" || p.Annotations[jobTemplate] != expected.Annotations[jobTemplate] ||
+		p.Annotations[profileAnnotation] != expected.Annotations[profileAnnotation] ||
+		p.Annotations[dindTemplate] != expected.Annotations[dindTemplate] || len(p.Spec.Containers) != len(expected.Spec.Containers) || len(p.Spec.InitContainers) != len(expected.Spec.InitContainers) {
 		return false
+	}
+	for i, c := range expected.Spec.InitContainers {
+		if p.Spec.InitContainers[i].Name != c.Name || p.Spec.InitContainers[i].Image != c.Image {
+			return false
+		}
 	}
 	for i, c := range expected.Spec.Containers {
 		if p.Spec.Containers[i].Name != c.Name || p.Spec.Containers[i].Image != c.Image {
@@ -240,21 +252,29 @@ func podSpec(id, name, image string, c Config) *core.Pod {
 	never := core.RestartPolicyNever
 	seccomp := core.SeccompProfile{Type: core.SeccompProfileTypeRuntimeDefault}
 	p := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: c.Namespace, Labels: map[string]string{"app.kubernetes.io/managed-by": "forgejo-runner-kubernetes", "forgejo.org/execution-id": id}, Annotations: map[string]string{"forgejo.org/runner-name": name}}, Spec: core.PodSpec{
-		RestartPolicy: never, AutomountServiceAccountToken: &no, NodeSelector: map[string]string{"kubernetes.io/arch": c.Arch}, SecurityContext: &core.PodSecurityContext{SeccompProfile: &seccomp, RunAsNonRoot: ptrBool(true), RunAsUser: ptrInt64(10001), FSGroup: ptrInt64(10001)},
+		RestartPolicy: never, AutomountServiceAccountToken: &no, NodeSelector: map[string]string{"kubernetes.io/arch": c.Arch}, SecurityContext: &core.PodSecurityContext{SeccompProfile: &seccomp, FSGroup: ptrInt64(10001)},
 		Volumes: []core.Volume{{Name: "workspace", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &workspaceSize}}}},
 		Containers: []core.Container{{Name: "job", Image: image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
 			SecurityContext: &core.SecurityContext{AppArmorProfile: appArmor, AllowPrivilegeEscalation: &no, Capabilities: &core.Capabilities{Drop: []core.Capability{"ALL"}}}, Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi"), core.ResourceEphemeralStorage: storageRequest}, Limits: core.ResourceList{core.ResourceCPU: resource.MustParse("1"), core.ResourceMemory: resource.MustParse("1Gi"), core.ResourceEphemeralStorage: storageLimit}}}},
 	}}
 	if c.DinD.Enabled {
 		c.DinD.addToPod(p)
-		// Hash before API defaulting and the Runner's remaining lifetime (which
-		// may vary on retries). Pin all operator-owned template configuration.
-		encoded, err := json.Marshal(p.Spec)
-		if err != nil {
-			panic(err)
-		}
-		sum := sha256.Sum256(encoded)
-		p.Annotations[dindTemplate] = hex.EncodeToString(sum[:])
+	}
+	c.applyIdentity(p)
+	// All profiles pin the full template before API defaulting and Runner's
+	// remaining lifetime. Never adopt an old, unhashed Pod on a Create retry.
+	encoded, err := json.Marshal(struct {
+		Spec              core.PodSpec `json:"spec"`
+		Profile           string       `json:"profile"`
+		EnvironmentPolicy string       `json:"environmentPolicy"`
+	}{p.Spec, c.securityProfile(), "job-env-v1"})
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(encoded)
+	p.Annotations[jobTemplate] = hex.EncodeToString(sum[:])
+	if c.DinD.Enabled {
+		p.Annotations[dindTemplate] = p.Annotations[jobTemplate]
 	}
 	return p
 }
@@ -278,6 +298,21 @@ func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.
 		if p.Status.Phase == core.PodFailed || p.Status.Phase == core.PodSucceeded {
 			return false, status.Errorf(codes.FailedPrecondition, "pod terminated: %s", p.Status.Message)
 		}
+		permissionsReady := len(p.Spec.InitContainers) == 0
+		for _, cs := range p.Status.InitContainerStatuses {
+			if cs.Name == "permissions" && cs.State.Terminated != nil && cs.State.Terminated.ExitCode == 0 {
+				permissionsReady = true
+			}
+			if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+				return false, status.Errorf(codes.FailedPrecondition, "permissions init failed (exit %d)", cs.State.Terminated.ExitCode)
+			}
+			if cs.State.Waiting != nil {
+				switch cs.State.Waiting.Reason {
+				case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError", "RunContainerError":
+					return false, status.Errorf(codes.FailedPrecondition, "permissions init: %s", cs.State.Waiting.Reason)
+				}
+			}
+		}
 		jobReady, daemonReady := false, false
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.State.Terminated != nil {
@@ -296,12 +331,15 @@ func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.
 				daemonReady = cs.Ready // kubelet's Docker API exec probe, not just Running.
 			}
 		}
-		if jobReady && (!podHasDinD(p) || daemonReady) {
+		if permissionsReady && jobReady && (!podHasDinD(p) || daemonReady) {
 			return true, nil
 		}
 		waiting = "job readiness"
 		if podHasDinD(p) && !daemonReady {
 			waiting = "dind Docker API readiness (docker info probe); inspect dind container logs"
+		}
+		if !permissionsReady {
+			waiting = "permissions init completion"
 		}
 		for _, cond := range p.Status.Conditions {
 			if cond.Type == core.PodScheduled && cond.Status == core.ConditionFalse && cond.Reason == "Unschedulable" {
@@ -323,8 +361,13 @@ func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.
 	if err != nil {
 		return err
 	}
-	env := podExecDefaults(p)
-	env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	env, err := s.executionDefaults(ctx, p)
+	if err != nil {
+		return err
+	}
+	if _, present := env["PATH"]; !present {
+		env["PATH"] = defaultExecPath
+	}
 	return stream.Send(&pb.StartOutput{Output: &pb.StartOutput_StartComplete{StartComplete: &pb.StartComplete{ImageEnv: env}}})
 }
 func (s *Server) Remove(_ context.Context, r *pb.RemoveRequest) (*pb.RemoveResponse, error) {

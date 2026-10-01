@@ -36,7 +36,7 @@ func TestPodSpec(t *testing.T) {
 	if p.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation == nil || *p.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation {
 		t.Fatal("privilege escalation enabled")
 	}
-	if *p.Spec.SecurityContext.RunAsUser == 0 || p.Spec.SecurityContext.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault {
+	if *p.Spec.Containers[0].SecurityContext.RunAsUser != 10001 || p.Spec.SecurityContext.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault {
 		t.Fatal("pod security context")
 	}
 	if len(p.Spec.Containers[0].Resources.Limits) != 3 || len(p.Spec.Containers[0].Resources.Requests) != 3 {
@@ -100,7 +100,7 @@ func TestJobAppArmorPodSpec(t *testing.T) {
 				}
 			}
 			if pc.SeccompProfile == nil || pc.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault || security.SeccompProfile != nil ||
-				pc.RunAsNonRoot == nil || !*pc.RunAsNonRoot || pc.RunAsUser == nil || *pc.RunAsUser != 10001 || pc.FSGroup == nil || *pc.FSGroup != 10001 ||
+				pc.RunAsNonRoot != nil || pc.RunAsUser != nil || security.RunAsNonRoot == nil || !*security.RunAsNonRoot || security.RunAsUser == nil || *security.RunAsUser != 10001 || pc.FSGroup == nil || *pc.FSGroup != 10001 ||
 				security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation || security.Privileged != nil && *security.Privileged ||
 				security.Capabilities == nil || !slices.Equal(security.Capabilities.Drop, []core.Capability{"ALL"}) || len(security.Capabilities.Add) != 0 ||
 				pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
