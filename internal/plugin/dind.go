@@ -27,58 +27,59 @@ type DinDConfig struct {
 	MemoryLimit             string
 	EphemeralStorageRequest string
 	EphemeralStorageLimit   string
-	DataSizeLimit           string
+	DataSizeLimit           string // Empty/none omits the data-volume cap.
+	SocketSizeLimit         string // Empty/none omits the socket-volume cap.
 	StorageDriver           string // Empty uses image default; overlay2 or vfs are explicit alternatives.
 }
 
-func (c DinDConfig) resources() (core.ResourceRequirements, resource.Quantity, error) {
+func (c DinDConfig) resources() (core.ResourceRequirements, *resource.Quantity, *resource.Quantity, error) {
 	result := core.ResourceRequirements{Requests: core.ResourceList{}, Limits: core.ResourceList{}}
-	parse := func(name, raw, def string) (resource.Quantity, error) {
-		if raw == "" {
-			raw = def
-		}
-		q, err := resource.ParseQuantity(raw)
-		if err != nil || q.Sign() <= 0 {
-			return q, fmt.Errorf("%s: positive Kubernetes quantity required, got %q", name, raw)
-		}
-		return q, nil
-	}
 	for _, pair := range []struct {
-		key                          core.ResourceName
-		requestName, limitName       string
-		request, limit               string
-		defaultRequest, defaultLimit string
+		key                    core.ResourceName
+		requestName, limitName string
+		request, limit         string
+		defaultRequest         string
 	}{
-		{core.ResourceCPU, "JOB_DIND_CPU_REQUEST", "JOB_DIND_CPU_LIMIT", c.CPURequest, c.CPULimit, "100m", "2"},
-		{core.ResourceMemory, "JOB_DIND_MEMORY_REQUEST", "JOB_DIND_MEMORY_LIMIT", c.MemoryRequest, c.MemoryLimit, "128Mi", "2Gi"},
-		{core.ResourceEphemeralStorage, "JOB_DIND_EPHEMERAL_STORAGE_REQUEST", "JOB_DIND_EPHEMERAL_STORAGE_LIMIT", c.EphemeralStorageRequest, c.EphemeralStorageLimit, "1Gi", "12Gi"},
+		{core.ResourceCPU, "JOB_DIND_CPU_REQUEST", "JOB_DIND_CPU_LIMIT", c.CPURequest, c.CPULimit, "100m"},
+		{core.ResourceMemory, "JOB_DIND_MEMORY_REQUEST", "JOB_DIND_MEMORY_LIMIT", c.MemoryRequest, c.MemoryLimit, "128Mi"},
+		{core.ResourceEphemeralStorage, "JOB_DIND_EPHEMERAL_STORAGE_REQUEST", "JOB_DIND_EPHEMERAL_STORAGE_LIMIT", c.EphemeralStorageRequest, c.EphemeralStorageLimit, "1Gi"},
 	} {
-		req, err := parse(pair.requestName, pair.request, pair.defaultRequest)
+		req, err := parseResourceQuantity(pair.requestName, pair.request, pair.defaultRequest, pair.key == core.ResourceCPU)
 		if err != nil {
-			return result, resource.Quantity{}, err
+			return result, nil, nil, err
 		}
-		lim, err := parse(pair.limitName, pair.limit, pair.defaultLimit)
+		lim, err := parseResourceQuantity(pair.limitName, pair.limit, "", pair.key == core.ResourceCPU)
 		if err != nil {
-			return result, resource.Quantity{}, err
+			return result, nil, nil, err
 		}
-		if req.Cmp(lim) > 0 {
-			return result, resource.Quantity{}, fmt.Errorf("%s must not exceed %s", pair.requestName, pair.limitName)
+		if req != nil && lim != nil && req.Cmp(*lim) > 0 {
+			return result, nil, nil, fmt.Errorf("%s must not exceed %s", pair.requestName, pair.limitName)
 		}
-		result.Requests[pair.key], result.Limits[pair.key] = req, lim
+		if req != nil {
+			result.Requests[pair.key] = *req
+		}
+		if lim != nil {
+			result.Limits[pair.key] = *lim
+		}
 	}
-	data, err := parse("JOB_DIND_DATA_SIZE_LIMIT", c.DataSizeLimit, "10Gi")
+	data, err := parseResourceQuantity("JOB_DIND_DATA_SIZE_LIMIT", c.DataSizeLimit, "", false)
 	if err != nil {
-		return result, data, err
+		return result, nil, nil, err
 	}
-	// Both data and socket emptyDirs count toward the Pod's aggregate local
-	// storage usage. Preserve positive headroom in the daemon's contribution
-	// above their combined caps, in addition to the job's existing headroom.
-	used := data.DeepCopy()
-	used.Add(resource.MustParse("1Mi"))
-	if used.Cmp(result.Limits[core.ResourceEphemeralStorage]) >= 0 {
-		return result, data, fmt.Errorf("JOB_DIND_DATA_SIZE_LIMIT plus the 1Mi socket volume must be less than JOB_DIND_EPHEMERAL_STORAGE_LIMIT")
+	socket, err := parseResourceQuantity("JOB_DIND_SOCKET_SIZE_LIMIT", c.SocketSizeLimit, "", false)
+	if err != nil {
+		return result, nil, nil, err
 	}
-	return result, data, nil
+	// Validate headroom only when all corresponding caps are selected.
+	// Uncapped volumes never imply a bound on aggregate local storage usage.
+	if limit, ok := result.Limits[core.ResourceEphemeralStorage]; ok && data != nil && socket != nil {
+		used := data.DeepCopy()
+		used.Add(*socket)
+		if used.Cmp(limit) >= 0 {
+			return result, nil, nil, fmt.Errorf("JOB_DIND_DATA_SIZE_LIMIT plus JOB_DIND_SOCKET_SIZE_LIMIT must be less than JOB_DIND_EPHEMERAL_STORAGE_LIMIT")
+		}
+	}
+	return result, data, socket, nil
 }
 
 func (c DinDConfig) validate() error {
@@ -97,19 +98,18 @@ func (c DinDConfig) validate() error {
 	default:
 		return fmt.Errorf("JOB_DIND_STORAGE_DRIVER: use overlay2, vfs or leave unset for the image default")
 	}
-	_, _, err := c.resources()
+	_, _, _, err := c.resources()
 	return err
 }
 
 func (c DinDConfig) addToPod(p *core.Pod) {
-	resources, dataSize, err := c.resources()
+	resources, dataSize, socketSize, err := c.resources()
 	if err != nil {
 		panic(err) // Config.Validate runs before provisioning.
 	}
-	socketSize := resource.MustParse("1Mi")
 	p.Spec.Volumes = append(p.Spec.Volumes,
-		core.Volume{Name: "docker-socket", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &socketSize}}},
-		core.Volume{Name: "docker-data", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &dataSize}}},
+		core.Volume{Name: "docker-socket", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: socketSize}}},
+		core.Volume{Name: "docker-data", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: dataSize}}},
 	)
 	job := &p.Spec.Containers[0]
 	job.VolumeMounts = append(job.VolumeMounts, core.VolumeMount{Name: "docker-socket", MountPath: dockerSocketDir})

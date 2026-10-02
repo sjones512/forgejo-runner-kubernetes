@@ -39,17 +39,15 @@ func TestPodSpec(t *testing.T) {
 	if p.Spec.Containers[0].SecurityContext.RunAsUser != nil || p.Spec.Containers[0].SecurityContext.RunAsNonRoot != nil || p.Spec.Containers[0].SecurityContext.Capabilities != nil || p.Spec.SecurityContext.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault {
 		t.Fatal("pod security context")
 	}
-	if len(p.Spec.Containers[0].Resources.Limits) != 2 || len(p.Spec.Containers[0].Resources.Requests) != 3 {
+	if len(p.Spec.Containers[0].Resources.Limits) != 0 || len(p.Spec.Containers[0].Resources.Requests) != 3 {
 		t.Fatal("unexpected resource policy")
 	}
-	if p.Spec.Volumes[0].EmptyDir == nil || p.Spec.Volumes[0].EmptyDir.SizeLimit == nil || len(p.Spec.Containers[0].VolumeMounts) != 2 {
+	if p.Spec.Volumes[0].EmptyDir == nil || p.Spec.Volumes[0].EmptyDir.SizeLimit != nil || len(p.Spec.Containers[0].VolumeMounts) != 2 {
 		t.Fatal("workspace not ephemeral")
 	}
 	storageRequest := p.Spec.Containers[0].Resources.Requests[core.ResourceEphemeralStorage]
-	storageLimit := p.Spec.Containers[0].Resources.Limits[core.ResourceEphemeralStorage]
-	if p.Spec.Volumes[0].EmptyDir.SizeLimit.Cmp(resource.MustParse("1Gi")) != 0 ||
-		storageRequest.Cmp(resource.MustParse("256Mi")) != 0 || storageLimit.Cmp(resource.MustParse("2Gi")) != 0 {
-		t.Fatal("default storage budget changed")
+	if storageRequest.Cmp(resource.MustParse("256Mi")) != 0 {
+		t.Fatal("default storage request changed")
 	}
 	if strings.Contains(p.Annotations["forgejo.org/runner-name"], "secret") {
 		t.Fatal("unexpected annotation")
@@ -181,7 +179,10 @@ func TestStorageConfigValidation(t *testing.T) {
 		{"zero request", "", "0", "", "JOB_EPHEMERAL_STORAGE_REQUEST"},
 		{"invalid limit", "", "", "2Gii", "JOB_EPHEMERAL_STORAGE_LIMIT"},
 		{"negative limit", "", "", "-1Gi", "JOB_EPHEMERAL_STORAGE_LIMIT"},
-		{"workspace exceeds default limit", "5Gi", "", "", "JOB_WORKSPACE_SIZE_LIMIT"},
+		{"workspace without container limit", "5Gi", "", "", ""},
+		{"container limit without workspace cap", "", "", "2Gi", ""},
+		{"request without limit", "", "3Gi", "", ""},
+		{"explicit none", "none", "none", "none", ""},
 		{"workspace equals limit", "2Gi", "", "2Gi", "JOB_WORKSPACE_SIZE_LIMIT"},
 		{"request exceeds limit", "", "3Gi", "2Gi", "JOB_EPHEMERAL_STORAGE_REQUEST"},
 	} {

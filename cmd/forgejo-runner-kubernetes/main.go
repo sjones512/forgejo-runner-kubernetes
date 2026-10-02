@@ -41,7 +41,7 @@ func jobConfig() (plugin.Config, error) {
 			CPURequest: os.Getenv("JOB_DIND_CPU_REQUEST"), CPULimit: os.Getenv("JOB_DIND_CPU_LIMIT"),
 			MemoryRequest: os.Getenv("JOB_DIND_MEMORY_REQUEST"), MemoryLimit: os.Getenv("JOB_DIND_MEMORY_LIMIT"),
 			EphemeralStorageRequest: os.Getenv("JOB_DIND_EPHEMERAL_STORAGE_REQUEST"), EphemeralStorageLimit: os.Getenv("JOB_DIND_EPHEMERAL_STORAGE_LIMIT"),
-			DataSizeLimit: os.Getenv("JOB_DIND_DATA_SIZE_LIMIT"), StorageDriver: os.Getenv("JOB_DIND_STORAGE_DRIVER"),
+			DataSizeLimit: os.Getenv("JOB_DIND_DATA_SIZE_LIMIT"), SocketSizeLimit: os.Getenv("JOB_DIND_SOCKET_SIZE_LIMIT"), StorageDriver: os.Getenv("JOB_DIND_STORAGE_DRIVER"),
 		},
 	}
 	if err := cfg.Validate(); err != nil {

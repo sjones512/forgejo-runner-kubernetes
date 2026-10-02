@@ -89,8 +89,8 @@ func TestDinDPodIsolationAndMounts(t *testing.T) {
 				t.Fatal(p.Spec.Volumes)
 			}
 			for _, v := range p.Spec.Volumes {
-				if v.EmptyDir == nil || v.EmptyDir.SizeLimit == nil || v.EmptyDir.Medium != "" || v.HostPath != nil || v.Projected != nil || v.Secret != nil {
-					t.Fatalf("non-ephemeral/unbounded volume: %+v", v)
+				if v.EmptyDir == nil || v.EmptyDir.SizeLimit != nil || v.EmptyDir.Medium != "" || v.HostPath != nil || v.Projected != nil || v.Secret != nil {
+					t.Fatalf("non-ephemeral/default-capped volume: %+v", v)
 				}
 			}
 			for _, m := range []core.VolumeMount{{Name: "workspace", MountPath: "/shared"}, {Name: "workspace", MountPath: "/workspace"}, {Name: "docker-socket", MountPath: dockerSocketDir}} {
@@ -122,7 +122,8 @@ func TestDinDPodIsolationAndMounts(t *testing.T) {
 func TestDinDDataMountOverridesImageVolume(t *testing.T) {
 	const imageVolume = "/var/lib/docker"
 	for _, tc := range []struct{ name, configured, want string }{
-		{"default", "", "10Gi"},
+		{"default", "", ""},
+		{"explicit none", "none", ""},
 		{"configured", "5Gi", "5Gi"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -154,16 +155,19 @@ func TestDinDDataMountOverridesImageVolume(t *testing.T) {
 			if roots != 1 {
 				t.Fatalf("expected exactly one fixed data-root, got %d", roots)
 			}
-			dataSize := resource.MustParse(tc.want)
-			socketSize := resource.MustParse("1Mi")
+			var dataSize *resource.Quantity
+			if tc.want != "" {
+				q := resource.MustParse(tc.want)
+				dataSize = &q
+			}
 			wantVolumes := map[string]core.VolumeSource{
-				"docker-data":   {EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &dataSize}},
-				"docker-socket": {EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &socketSize}},
+				"docker-data":   {EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: dataSize}},
+				"docker-socket": {EmptyDir: &core.EmptyDirVolumeSource{}},
 			}
 			for _, volume := range p.Spec.Volumes {
 				if want, ok := wantVolumes[volume.Name]; ok {
 					if !reflect.DeepEqual(volume.VolumeSource, want) {
-						t.Fatalf("%s must remain a separate capped disk emptyDir: %+v", volume.Name, volume.VolumeSource)
+						t.Fatalf("%s must remain a separate disk emptyDir with the operator's cap: %+v", volume.Name, volume.VolumeSource)
 					}
 					delete(wantVolumes, volume.Name)
 				}
@@ -178,8 +182,11 @@ func TestDinDDataMountOverridesImageVolume(t *testing.T) {
 func TestDinDResourcesAndValidation(t *testing.T) {
 	defaults := dindConfig()
 	p := podSpec(podName("resources"), "resources", defaults.Image, defaults)
-	if p.Spec.Volumes[2].EmptyDir.SizeLimit.String() != "10Gi" || p.Spec.Containers[1].Resources.Limits.StorageEphemeral().String() != "12Gi" {
-		t.Fatal("default data/headroom budget")
+	if p.Spec.Volumes[2].EmptyDir.SizeLimit != nil || p.Spec.Volumes[1].EmptyDir.SizeLimit != nil || len(p.Spec.Containers[1].Resources.Limits) != 0 {
+		t.Fatal("default daemon caps")
+	}
+	if r := p.Spec.Containers[1].Resources; r.Requests.Cpu().String() != "100m" || r.Requests.Memory().String() != "128Mi" || r.Requests.StorageEphemeral().String() != "1Gi" {
+		t.Fatal("daemon requests changed")
 	}
 	for _, tc := range []struct {
 		name string
@@ -195,16 +202,42 @@ func TestDinDResourcesAndValidation(t *testing.T) {
 		{"invalid name", func(d *DinDConfig) { d.Image = "https://" + testDinDImage }, "JOB_DIND_IMAGE"},
 		{"bad disabled image", func(d *DinDConfig) { d.Enabled = false; d.Image = "docker:latest" }, "JOB_DIND_IMAGE"},
 		{"cpu zero", func(d *DinDConfig) { d.CPURequest = "0" }, "JOB_DIND_CPU_REQUEST"},
-		{"cpu reversed", func(d *DinDConfig) { d.CPURequest = "3" }, "JOB_DIND_CPU_REQUEST"},
+		{"cpu request without limit", func(d *DinDConfig) { d.CPURequest = "3" }, ""},
+		{"cpu reversed", func(d *DinDConfig) { d.CPURequest = "3"; d.CPULimit = "2" }, "JOB_DIND_CPU_REQUEST"},
+		{"cpu precision", func(d *DinDConfig) { d.CPULimit = "0.5m" }, "JOB_DIND_CPU_LIMIT"},
 		{"cpu limit invalid", func(d *DinDConfig) { d.CPULimit = "bogus" }, "JOB_DIND_CPU_LIMIT"},
-		{"memory reversed", func(d *DinDConfig) { d.MemoryRequest = "3Gi" }, "JOB_DIND_MEMORY_REQUEST"},
+		{"memory request without limit", func(d *DinDConfig) { d.MemoryRequest = "3Gi" }, ""},
+		{"memory reversed", func(d *DinDConfig) { d.MemoryRequest = "3Gi"; d.MemoryLimit = "2Gi" }, "JOB_DIND_MEMORY_REQUEST"},
 		{"memory negative", func(d *DinDConfig) { d.MemoryLimit = "-1Gi" }, "JOB_DIND_MEMORY_LIMIT"},
-		{"storage reversed", func(d *DinDConfig) { d.EphemeralStorageRequest = "13Gi" }, "JOB_DIND_EPHEMERAL_STORAGE_REQUEST"},
+		{"storage request without limit", func(d *DinDConfig) { d.EphemeralStorageRequest = "13Gi" }, ""},
+		{"storage reversed", func(d *DinDConfig) { d.EphemeralStorageRequest = "13Gi"; d.EphemeralStorageLimit = "12Gi" }, "JOB_DIND_EPHEMERAL_STORAGE_REQUEST"},
 		{"storage zero", func(d *DinDConfig) { d.EphemeralStorageLimit = "0" }, "JOB_DIND_EPHEMERAL_STORAGE_LIMIT"},
 		{"data invalid", func(d *DinDConfig) { d.DataSizeLimit = "10GiB" }, "JOB_DIND_DATA_SIZE_LIMIT"},
 		{"data zero", func(d *DinDConfig) { d.DataSizeLimit = "0" }, "JOB_DIND_DATA_SIZE_LIMIT"},
-		{"data exceeds budget", func(d *DinDConfig) { d.DataSizeLimit = "12Gi" }, "JOB_DIND_DATA_SIZE_LIMIT"},
-		{"data socket equals budget", func(d *DinDConfig) { d.EphemeralStorageLimit = "10241Mi" }, "JOB_DIND_DATA_SIZE_LIMIT"},
+		{"data without container limit", func(d *DinDConfig) { d.DataSizeLimit = "12Gi" }, ""},
+		{"socket invalid", func(d *DinDConfig) { d.SocketSizeLimit = "bad" }, "JOB_DIND_SOCKET_SIZE_LIMIT"},
+		{"socket zero", func(d *DinDConfig) { d.SocketSizeLimit = "0" }, "JOB_DIND_SOCKET_SIZE_LIMIT"},
+		{"socket negative", func(d *DinDConfig) { d.SocketSizeLimit = "-1Mi" }, "JOB_DIND_SOCKET_SIZE_LIMIT"},
+		{"data exceeds budget", func(d *DinDConfig) {
+			d.DataSizeLimit = "12Gi"
+			d.SocketSizeLimit = "1Mi"
+			d.EphemeralStorageLimit = "12Gi"
+		}, "JOB_DIND_DATA_SIZE_LIMIT"},
+		{"data socket equals budget", func(d *DinDConfig) {
+			d.DataSizeLimit = "10Gi"
+			d.SocketSizeLimit = "1Mi"
+			d.EphemeralStorageLimit = "10241Mi"
+		}, "JOB_DIND_DATA_SIZE_LIMIT"},
+		{"all omitted", func(d *DinDConfig) {
+			d.CPURequest = "none"
+			d.CPULimit = "none"
+			d.MemoryRequest = "none"
+			d.MemoryLimit = "none"
+			d.EphemeralStorageRequest = "none"
+			d.EphemeralStorageLimit = "none"
+			d.DataSizeLimit = "none"
+			d.SocketSizeLimit = "none"
+		}, ""},
 		{"driver invalid", func(d *DinDConfig) { d.StorageDriver = "--host=tcp://0.0.0.0:2375" }, "JOB_DIND_STORAGE_DRIVER"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,13 +250,13 @@ func TestDinDResourcesAndValidation(t *testing.T) {
 		})
 	}
 	cfg := dindConfig()
-	cfg.DinD = DinDConfig{Enabled: true, Image: testDinDImage, CPURequest: "500m", CPULimit: "4", MemoryRequest: "1Gi", MemoryLimit: "4Gi", DataSizeLimit: "20Gi", EphemeralStorageRequest: "3Gi", EphemeralStorageLimit: "25Gi", StorageDriver: "vfs"}
+	cfg.DinD = DinDConfig{Enabled: true, Image: testDinDImage, CPURequest: "500m", CPULimit: "4", MemoryRequest: "1Gi", MemoryLimit: "4Gi", DataSizeLimit: "20Gi", SocketSizeLimit: "2Mi", EphemeralStorageRequest: "3Gi", EphemeralStorageLimit: "25Gi", StorageDriver: "vfs"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	p = podSpec(p.Name, "resources", cfg.Image, cfg)
 	r := p.Spec.Containers[1].Resources
-	if r.Requests.Cpu().String() != "500m" || r.Limits.Cpu().String() != "4" || r.Requests.Memory().String() != "1Gi" || r.Limits.Memory().String() != "4Gi" || r.Requests.StorageEphemeral().String() != "3Gi" || r.Limits.StorageEphemeral().String() != "25Gi" || p.Spec.Volumes[2].EmptyDir.SizeLimit.String() != "20Gi" || !slices.Contains(p.Spec.Containers[1].Args, "--storage-driver=vfs") {
+	if r.Requests.Cpu().String() != "500m" || r.Limits.Cpu().String() != "4" || r.Requests.Memory().String() != "1Gi" || r.Limits.Memory().String() != "4Gi" || r.Requests.StorageEphemeral().String() != "3Gi" || r.Limits.StorageEphemeral().String() != "25Gi" || p.Spec.Volumes[2].EmptyDir.SizeLimit.String() != "20Gi" || p.Spec.Volumes[1].EmptyDir.SizeLimit.String() != "2Mi" || !slices.Contains(p.Spec.Containers[1].Args, "--storage-driver=vfs") {
 		t.Fatal("custom daemon resources/driver not applied")
 	}
 }
@@ -254,6 +287,10 @@ func TestDinDImageSelectionRetryAndRemove(t *testing.T) {
 				func(c *Config) { c.DinD.Enabled = false },
 				func(c *Config) { c.DinD.Image = "docker@sha256:" + strings.Repeat("a", 64) },
 				func(c *Config) { c.DinD.MemoryLimit = "4Gi" },
+				func(c *Config) { c.DinD.CPULimit = "2" },
+				func(c *Config) { c.DinD.EphemeralStorageLimit = "12Gi" },
+				func(c *Config) { c.DinD.DataSizeLimit = "10Gi" },
+				func(c *Config) { c.DinD.SocketSizeLimit = "1Mi" },
 				func(c *Config) { c.DinD.StorageDriver = "vfs" },
 				func(c *Config) { c.WorkspaceSizeLimit = "512Mi" },
 			} {

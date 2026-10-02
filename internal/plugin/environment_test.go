@@ -47,11 +47,11 @@ func TestOrdinaryImageJobPolicy(t *testing.T) {
 			t.Fatal("job isolation/init boundary")
 		}
 		for _, v := range p.Spec.Volumes {
-			if v.EmptyDir == nil || v.EmptyDir.SizeLimit == nil || v.HostPath != nil || v.Projected != nil {
+			if v.EmptyDir == nil || v.EmptyDir.SizeLimit != nil || v.HostPath != nil || v.Projected != nil {
 				t.Fatal("volume boundary")
 			}
 		}
-		if len(job.Resources.Limits) != 2 || len(job.Resources.Requests) != 3 || len(job.VolumeMounts) != 2+map[bool]int{false: 0, true: 1}[dind] {
+		if len(job.Resources.Limits) != 0 || len(job.Resources.Requests) != 3 || len(job.VolumeMounts) != 2+map[bool]int{false: 0, true: 1}[dind] {
 			t.Fatal("storage/resources/mounts")
 		}
 		if dind {

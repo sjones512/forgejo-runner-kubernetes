@@ -21,15 +21,16 @@ func TestJobResourcePolicy(t *testing.T) {
 		name, cpuReq, cpuLim, memReq, memLim           string
 		wantCPUReq, wantCPULim, wantMemReq, wantMemLim string
 	}{
-		{"default", "", "", "", "", "100m", "", "128Mi", "1Gi"},
-		{"CPU request", "500m", "", "", "", "500m", "", "128Mi", "1Gi"},
-		{"CPU ceiling", "", "2", "", "", "100m", "2", "128Mi", "1Gi"},
-		{"independent CPU pair", "500m", "4", "", "", "500m", "4", "128Mi", "1Gi"},
-		{"equal CPU pair", "2", "2", "", "", "2", "2", "128Mi", "1Gi"},
+		{"default", "", "", "", "", "100m", "", "128Mi", ""},
+		{"CPU request", "500m", "", "", "", "500m", "", "128Mi", ""},
+		{"CPU ceiling", "", "2", "", "", "100m", "2", "128Mi", ""},
+		{"independent CPU pair", "500m", "4", "", "", "500m", "4", "128Mi", ""},
+		{"equal CPU pair", "2", "2", "", "", "2", "2", "128Mi", ""},
+		{"memory request without ceiling", "", "", "2Gi", "", "100m", "", "2Gi", ""},
 		{"memory pair", "", "", "512Mi", "2Gi", "100m", "", "512Mi", "2Gi"},
 		{"equal memory pair", "", "", "2Gi", "2Gi", "100m", "", "2Gi", "2Gi"},
-		{"omit both CPU", "none", "none", "", "", "", "", "128Mi", "1Gi"},
-		{"CPU limit only", "none", "50m", "", "", "", "50m", "128Mi", "1Gi"},
+		{"omit both CPU", "none", "none", "", "", "", "", "128Mi", ""},
+		{"CPU limit only", "none", "50m", "", "", "", "50m", "128Mi", ""},
 		{"memory limit only", "", "", "none", "2Gi", "100m", "", "", "2Gi"},
 		{"memory request only", "", "", "2Gi", "none", "100m", "", "2Gi", ""},
 		{"all optional omitted", "none", "none", "none", "none", "", "", "", ""},
@@ -60,9 +61,9 @@ func TestJobResourcePolicy(t *testing.T) {
 			check(r.Requests, core.ResourceMemory, tc.wantMemReq)
 			check(r.Limits, core.ResourceMemory, tc.wantMemLim)
 			check(r.Requests, core.ResourceEphemeralStorage, "256Mi")
-			check(r.Limits, core.ResourceEphemeralStorage, "2Gi")
-			if p.Spec.Volumes[0].EmptyDir.SizeLimit.Cmp(resource.MustParse("1Gi")) != 0 {
-				t.Fatal("workspace cap changed")
+			check(r.Limits, core.ResourceEphemeralStorage, "")
+			if p.Spec.Volumes[0].EmptyDir.SizeLimit != nil {
+				t.Fatal("default workspace cap")
 			}
 			// Check actual serialized policy: omission is not a zero/empty CPU limit.
 			data, err := json.Marshal(r)
@@ -73,9 +74,11 @@ func TestJobResourcePolicy(t *testing.T) {
 			if err := json.Unmarshal(data, &serialized); err != nil {
 				t.Fatal(err)
 			}
-			_, present := serialized.Limits["cpu"]
-			if present != (tc.wantCPULim != "") {
-				t.Fatal("JSON CPU limit omission", string(data))
+			for key, want := range map[string]string{"cpu": tc.wantCPULim, "memory": tc.wantMemLim, "ephemeral-storage": ""} {
+				_, present := serialized.Limits[key]
+				if present != (want != "") {
+					t.Fatal("JSON limit omission", key, string(data))
+				}
 			}
 		})
 	}
@@ -133,7 +136,8 @@ func TestJobResourceTemplateConflicts(t *testing.T) {
 		for _, change := range []func(*Config){
 			func(c *Config) { c.CPURequest = "500m" }, func(c *Config) { c.CPULimit = "2" },
 			func(c *Config) { c.MemoryRequest = "512Mi" }, func(c *Config) { c.MemoryLimit = "2Gi" },
-			func(c *Config) { c.CPURequest = "none" }, func(c *Config) { c.MemoryLimit = "none" },
+			func(c *Config) { c.CPURequest = "none" }, func(c *Config) { c.EphemeralStorageLimit = "2Gi" },
+			func(c *Config) { c.WorkspaceSizeLimit = "1Gi" },
 		} {
 			other := cfg
 			change(&other)
@@ -147,6 +151,9 @@ func TestJobResourceTemplateConflicts(t *testing.T) {
 		}
 		equivalent := cfg
 		equivalent.CPULimit = "none"
+		equivalent.MemoryLimit = "none"
+		equivalent.EphemeralStorageLimit = "none"
+		equivalent.WorkspaceSizeLimit = "none"
 		reload, _ := New(equivalent, kube, &rest.Config{})
 		if _, err := reload.Create(context.Background(), r); err != nil {
 			t.Fatal("equivalent omission should hash identically", err)

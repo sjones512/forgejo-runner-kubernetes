@@ -47,10 +47,12 @@ func TestJobDinDEnvironment(t *testing.T) {
 		{"missing image", map[string]string{"JOB_DIND_ENABLED": "true"}, "JOB_DIND_IMAGE"},
 		{"mutable image", map[string]string{"JOB_DIND_ENABLED": "true", "JOB_DIND_IMAGE": "docker:29-dind"}, "JOB_DIND_IMAGE"},
 		{"invalid resource while disabled", map[string]string{"JOB_DIND_MEMORY_REQUEST": "0"}, "JOB_DIND_MEMORY_REQUEST"},
-		{"reversed data/storage budget", map[string]string{"JOB_DIND_DATA_SIZE_LIMIT": "12Gi"}, "JOB_DIND_DATA_SIZE_LIMIT"},
+		{"data cap without container limit", map[string]string{"JOB_DIND_DATA_SIZE_LIMIT": "12Gi"}, ""},
+		{"reversed data/storage budget", map[string]string{"JOB_DIND_DATA_SIZE_LIMIT": "12Gi", "JOB_DIND_SOCKET_SIZE_LIMIT": "1Mi", "JOB_DIND_EPHEMERAL_STORAGE_LIMIT": "12Gi"}, "JOB_DIND_DATA_SIZE_LIMIT"},
+		{"invalid socket cap while disabled", map[string]string{"JOB_DIND_SOCKET_SIZE_LIMIT": "bad"}, "JOB_DIND_SOCKET_SIZE_LIMIT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, key := range []string{"JOB_DIND_ENABLED", "JOB_DIND_IMAGE", "JOB_DIND_CPU_REQUEST", "JOB_DIND_CPU_LIMIT", "JOB_DIND_MEMORY_REQUEST", "JOB_DIND_MEMORY_LIMIT", "JOB_DIND_EPHEMERAL_STORAGE_REQUEST", "JOB_DIND_EPHEMERAL_STORAGE_LIMIT", "JOB_DIND_DATA_SIZE_LIMIT", "JOB_DIND_STORAGE_DRIVER"} {
+			for _, key := range []string{"JOB_DIND_ENABLED", "JOB_DIND_IMAGE", "JOB_DIND_CPU_REQUEST", "JOB_DIND_CPU_LIMIT", "JOB_DIND_MEMORY_REQUEST", "JOB_DIND_MEMORY_LIMIT", "JOB_DIND_EPHEMERAL_STORAGE_REQUEST", "JOB_DIND_EPHEMERAL_STORAGE_LIMIT", "JOB_DIND_DATA_SIZE_LIMIT", "JOB_DIND_SOCKET_SIZE_LIMIT", "JOB_DIND_STORAGE_DRIVER"} {
 				t.Setenv(key, tc.env[key])
 			}
 			cfg, err := jobConfig()
@@ -71,13 +73,14 @@ func TestJobDinDEnvironment(t *testing.T) {
 	t.Setenv("JOB_DIND_EPHEMERAL_STORAGE_REQUEST", "3Gi")
 	t.Setenv("JOB_DIND_EPHEMERAL_STORAGE_LIMIT", "25Gi")
 	t.Setenv("JOB_DIND_DATA_SIZE_LIMIT", "20Gi")
+	t.Setenv("JOB_DIND_SOCKET_SIZE_LIMIT", "2Mi")
 	t.Setenv("JOB_DIND_STORAGE_DRIVER", "vfs")
 	cfg, err := jobConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	d := cfg.DinD
-	if d.CPURequest != "500m" || d.CPULimit != "4" || d.MemoryRequest != "1Gi" || d.MemoryLimit != "4Gi" || d.EphemeralStorageRequest != "3Gi" || d.EphemeralStorageLimit != "25Gi" || d.DataSizeLimit != "20Gi" || d.StorageDriver != "vfs" {
+	if d.CPURequest != "500m" || d.CPULimit != "4" || d.MemoryRequest != "1Gi" || d.MemoryLimit != "4Gi" || d.EphemeralStorageRequest != "3Gi" || d.EphemeralStorageLimit != "25Gi" || d.DataSizeLimit != "20Gi" || d.SocketSizeLimit != "2Mi" || d.StorageDriver != "vfs" {
 		t.Fatal("resource/driver environment not applied", d)
 	}
 }
@@ -112,6 +115,8 @@ func TestJobStorageEnvironment(t *testing.T) {
 	}{
 		{"defaults", "", "", "", ""},
 		{"valid override", "5Gi", "3Gi", "7Gi", ""},
+		{"workspace cap only", "5Gi", "", "", ""},
+		{"none", "none", "none", "none", ""},
 		{"invalid quantity", "5GiB", "", "", "JOB_WORKSPACE_SIZE_LIMIT"},
 		{"invalid relationship", "5Gi", "", "2Gi", "JOB_WORKSPACE_SIZE_LIMIT"},
 		{"invalid request", "", "3Gi", "2Gi", "JOB_EPHEMERAL_STORAGE_REQUEST"},

@@ -20,7 +20,6 @@ import (
 	"google.golang.org/grpc/status"
 	core "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -30,12 +29,6 @@ import (
 const prefix = "fj-exec-"
 const workspace = "/shared"
 const jobTemplate = "forgejo.org/job-template-sha256"
-
-const (
-	defaultWorkspaceSizeLimit      = "1Gi"
-	defaultEphemeralStorageRequest = "256Mi"
-	defaultEphemeralStorageLimit   = "2Gi"
-)
 
 // Config fixes the job namespace and supplies the default job image. Runner
 // label arguments and explicit container.image may select another job image.
@@ -48,10 +41,10 @@ type Config struct {
 	CPURequest              string // Empty defaults to 100m; none omits.
 	CPULimit                string // Empty/none omits; positive quantity opts into a CPU ceiling.
 	MemoryRequest           string // Empty defaults to 128Mi; none omits.
-	MemoryLimit             string // Empty defaults to 1Gi; none delegates bounding to cluster policy.
-	WorkspaceSizeLimit      string // Kubernetes quantities; empty means default.
-	EphemeralStorageRequest string
-	EphemeralStorageLimit   string
+	MemoryLimit             string // Empty/none omits.
+	WorkspaceSizeLimit      string // Empty/none omits the emptyDir size cap.
+	EphemeralStorageRequest string // Empty defaults to 256Mi; none omits.
+	EphemeralStorageLimit   string // Empty/none omits.
 	AppArmorProfile         string // Empty leaves AppArmor unspecified; otherwise runtime-default, unconfined or localhost:<name>.
 	DinD                    DinDConfig
 }
@@ -88,39 +81,6 @@ func (c Config) appArmorProfile() (*core.AppArmorProfile, error) {
 		return nil, fmt.Errorf("JOB_APPARMOR_PROFILE: localhost requires a non-empty profile name without surrounding whitespace or control characters")
 	}
 	return nil, fmt.Errorf("JOB_APPARMOR_PROFILE: invalid value %q; use runtime-default, unconfined or localhost:<name> (or leave unset)", c.AppArmorProfile)
-}
-
-// The disk-backed emptyDir is part of the Pod's local ephemeral-storage usage,
-// not extra capacity. Leave room above its cap for writable layers and logs.
-func (c Config) storageQuantities() (workspaceSize, request, limit resource.Quantity, err error) {
-	parse := func(name, raw, def string) (resource.Quantity, error) {
-		if raw == "" {
-			raw = def
-		}
-		q, e := resource.ParseQuantity(raw)
-		if e != nil {
-			return q, fmt.Errorf("%s: invalid Kubernetes quantity %q: %w", name, raw, e)
-		}
-		if q.Sign() <= 0 {
-			return q, fmt.Errorf("%s must be positive: %q", name, raw)
-		}
-		return q, nil
-	}
-	if workspaceSize, err = parse("JOB_WORKSPACE_SIZE_LIMIT", c.WorkspaceSizeLimit, defaultWorkspaceSizeLimit); err != nil {
-		return
-	}
-	if request, err = parse("JOB_EPHEMERAL_STORAGE_REQUEST", c.EphemeralStorageRequest, defaultEphemeralStorageRequest); err != nil {
-		return
-	}
-	if limit, err = parse("JOB_EPHEMERAL_STORAGE_LIMIT", c.EphemeralStorageLimit, defaultEphemeralStorageLimit); err != nil {
-		return
-	}
-	if request.Cmp(limit) > 0 {
-		err = fmt.Errorf("JOB_EPHEMERAL_STORAGE_REQUEST must not exceed JOB_EPHEMERAL_STORAGE_LIMIT")
-	} else if workspaceSize.Cmp(limit) >= 0 {
-		err = fmt.Errorf("JOB_WORKSPACE_SIZE_LIMIT must be less than JOB_EPHEMERAL_STORAGE_LIMIT to leave room for container layers and logs")
-	}
-	return
 }
 
 type Server struct {
@@ -252,7 +212,7 @@ func podSpec(id, name, image string, c Config) *core.Pod {
 	seccomp := core.SeccompProfile{Type: core.SeccompProfileTypeRuntimeDefault}
 	p := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: c.Namespace, Labels: map[string]string{"app.kubernetes.io/managed-by": "forgejo-runner-kubernetes", "forgejo.org/execution-id": id}, Annotations: map[string]string{"forgejo.org/runner-name": name}}, Spec: core.PodSpec{
 		RestartPolicy: never, AutomountServiceAccountToken: &no, NodeSelector: map[string]string{"kubernetes.io/arch": c.Arch}, SecurityContext: &core.PodSecurityContext{SeccompProfile: &seccomp},
-		Volumes: []core.Volume{{Name: "workspace", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &workspaceSize}}}},
+		Volumes: []core.Volume{{Name: "workspace", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: workspaceSize}}}},
 		Containers: []core.Container{{Name: "job", Image: image, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
 			SecurityContext: &core.SecurityContext{AppArmorProfile: appArmor, Privileged: &no, AllowPrivilegeEscalation: &no}, Resources: resources}},
 	}}

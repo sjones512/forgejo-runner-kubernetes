@@ -1,6 +1,6 @@
 # Ordinary image-native jobs
 
-One job model: **run the selected image as an ordinary non-privileged Kubernetes container**. This pre-alpha plugin has no compatibility commitment to the former fixed UID. There are no job security profiles, custom capability lists, permissions images/init helpers, or NSS/passwd fixes. The identity simplification was published in alpha.11; the subsequent resource/pull-policy cleanup targets alpha.12 after explicit review/publication authorization. No cluster deployment is performed here. Full generated-field inventory, resource defaults/configuration and CPU experiment: **[pod-policy.md](pod-policy.md)**. [Executor-model research](executor-model.md) records the source evidence and deferred service work.
+One job model: **run the selected image as an ordinary non-privileged Kubernetes container**. This pre-alpha plugin has no compatibility commitment to the former fixed UID. There are no job security profiles, custom capability lists, permissions images/init helpers, or NSS/passwd fixes. The identity simplification was published in alpha.11; alpha.12 published CPU/pull-policy cleanup. The subsequent **alpha.13** follow-up removes all remaining default resource/storage caps; the operator/namespace chooses limits. No cluster deployment is performed here. Full generated-field inventory, resource defaults/configuration and CPU experiment: **[pod-policy.md](pod-policy.md)**. [Executor-model research](executor-model.md) records the source evidence and deferred service work.
 
 ## Identity, capabilities and outer boundaries
 
@@ -11,7 +11,7 @@ Retained boundaries:
 - Explicit job `privileged: false` and `allowPrivilegeEscalation: false` (no-new-privileges).
 - Pod RuntimeDefault seccomp and existing operator-selected **job-only** AppArmor; unset AppArmor remains unspecified. The supplied trusted environment's accepted Unconfined override is not a plugin default.
 - No host namespaces, host paths/runtime sockets, shared process namespace or ServiceAccount token.
-- Operator resource policy (alpha.12: CPU100m request/no default limit, memory128Mi/1Gi, existing bounded ephemeral storage), capped disk emptyDirs, restartPolicy Never and Runner lifetime deadline. See [resource semantics/configuration](pod-policy.md#operator-resource-contract), distinct from daemon budgets.
+- Operator-opt-in resource/storage limits (alpha.13: **no default CPU/memory/ephemeral or emptyDir size caps**, including DinD). Scheduling requests remain unchanged; restartPolicy Never and Runner lifetime deadline remain executor mechanics. See [resource semantics/configuration](pod-policy.md#operator-resource-contract), distinct from daemon budgets.
 - Required NetworkPolicy isolation: only the trusted Runner may reach unauthenticated plugin gRPC. Ordinary Pod network access still needs operator policy.
 
 **fsGroup 10001 is emitted only with fixed DinD**, for its group-accessible Unix socket; it does not change the image's primary GID or create an account. Ordinary workspace emptyDir writes do not require a forced group. Fixed DinD retains its existing daemon-only privileged/root/Unconfined fields, image pin, args, probes and budgets.
@@ -43,9 +43,9 @@ The executor still replaces image ENTRYPOINT/CMD with its long-lived CI command 
 
 No permission preparation/hardening is added. Kubernetes emptyDir starts with a broad **0777** root. With fixed DinD, fsGroup supplies group ownership/permissions and setgid, so roots can be root:10001 **02777**; fsGroup does not remove world-write. These volumes are private to one ephemeral job Pod, not shared across jobs or mounted from the host. World-write is a known within-Pod security characteristic to revisit separately if warranted, not group-private hardening.
 
-The unchanged job startup creates /shared/{act,toolcache,workdir,tmp} as its effective identity, which also runs Exec and tar transfers. Both aliases share one capped disk emptyDir. Workload umask/chmod and ownership govern children; arbitrary cross-UID writes into another process's restrictive directories are not guaranteed.
+The unchanged job startup creates /shared/{act,toolcache,workdir,tmp} as its effective identity, which also runs Exec and tar transfers. Both aliases share one disk emptyDir, with an optional operator size cap. Workload umask/chmod and ownership govern children; arbitrary cross-UID writes into another process's restrictive directories are not guaranteed.
 
-Fixed `JOB_DIND_ENABLED` remains operator-only/default-off: same pinned daemon, private socket root:10001 **0660**, data root /var/lib/docker, bounded resources/storage/readiness, shared binds/private-/tmp semantics, DOCKER_HOST/TMPDIR defaults and explicit Runner override precedence. A non-privileged job accesses the daemon via supplemental group 10001. Deliberately dropping supplemental groups can lose socket access. Controlling the privileged nested daemon still creates an elevated kernel/runtime attack surface. No workflow services or DinD migration.
+Fixed `JOB_DIND_ENABLED` remains operator-only/default-off: same pinned daemon, private socket root:10001 **0660**, data root /var/lib/docker, operator-opt-in resources/storage caps and bounded readiness, shared binds/private-/tmp semantics, DOCKER_HOST/TMPDIR defaults and explicit Runner override precedence. A non-privileged job accesses the daemon via supplemental group 10001. Deliberately dropping supplemental groups can lose socket access. Controlling the privileged nested daemon still creates an elevated kernel/runtime attack surface. No workflow services or DinD migration.
 
 ## Templates, restart and upgrade
 
@@ -69,7 +69,7 @@ Passed root, named node, registered numeric1000 and arbitrary UID23456/GID34567,
 
 Docker named volumes start 0755/root:root, unlike kubelet emptyDir, so test-only setup models existing **0777**, or **02777/root:10001 with DinD**, roots before workloads. It does not create staging directories or implement production permission preparation. Docker --user and --group-add model image-resolved credentials/fsGroup, **not real Kubernetes image USER/fsGroup**, ARM64 execution, target runtime policy, storage-cap accounting or build/cache/publication. No custom CI image is built. The specific supplied homedir failure remains unattributed pending real integration.
 
-**The identity model was introduced in alpha.11; alpha.12 adds reviewed resource-policy changes. Publication is not cluster acceptance.** After separately authorized deployment of an immutable release digest:
+**Identity arrived in alpha.11 and CPU/pull cleanup in alpha.12. Alpha.13 removes all remaining default caps after explicit review/publication authorization. Publication is not cluster acceptance.** After separately authorized deployment of an immutable release digest:
 
 1. Drain active old jobs and deploy the newly authorized immutable plugin digest. Preserve namespace/storage/fixed DinD and accepted job AppArmor settings otherwise; there is no security-profile/helper configuration.
 2. On ARM64, exercise images declaring root/default USER, named USER, registered numeric USER and arbitrary numeric USER. Capture actual euid/egid/groups, capabilities/no-new-privileges/seccomp, selected image/runtime digest, HOME presence and NSS result; verify no privileged job/init/token/host access. Check fsGroup absent without DinD and 10001 with it, recording actual emptyDir/socket modes.

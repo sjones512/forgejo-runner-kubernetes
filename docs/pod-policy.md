@@ -1,14 +1,14 @@
 # Generated CI Pod policy audit and operator contract
 
-**Resource policy for v0.1.0-alpha.12, following alpha.11 (`30063dd`).** Publication was explicitly authorized after audit review; cluster deployment/acceptance remains separate. Scope: plugin-generated jobs, not the plugin Deployment's own security/resources. No Forgejo, application or cluster-IaC access. The CPU baseline below is operator-supplied evidence, not measured here.
+**Alpha.13 follow-up to alpha.12: no default resource/storage caps.** The operator rejected the remaining default memory/storage/DinD limits as outside the executor's responsibility and explicitly authorized publication after review. Alpha.12 remains immutable; deployment and cluster acceptance require separate authorization. Scope: plugin-generated jobs, not the plugin Deployment's own security/resources. No Forgejo, application or cluster-IaC access. The CPU baseline below is operator-supplied evidence, not measured here.
 
 ## Review findings and decisions
 
 Alpha.11 emits job requests **100m CPU / 128Mi memory / 256Mi ephemeral** and limits **1 CPU / 1Gi memory / 2Gi ephemeral**. Only the ephemeral values and workspace cap are configurable. None of these exact numbers is a Runner mechanic. The reported four-core job had cpu.max `100000 100000`, Node availableParallelism1, throttled periods37–39% and CPU PSI some avg10/60/300 about67/58/52%, with negligible I/O/memory PSI. This supports removing the arbitrary one-core ceiling, not diagnosing Vitest.
 
-CPU is compressible: a request informs placement and contention weight, while a CPU limit throttles available bursts. Keep a modest **100m scheduling default** (not a reservation of one core and not a ceiling), expose its operator choice, and **omit CPU limit by default**. A contention-aware operator can raise requests without setting an equal limit. The same review finds fixed memory values deserve operator control: retain **128Mi request / 1Gi limit** as lightweight scheduling and finite node-memory protection defaults, not required workload sizes. Memory limits can cause OOM kills and unlimited memory exposes node pressure; explicit omission is an operator decision, not inferred from CPU's compressibility.
+Alpha.12 omitted the CPU limit but retained memory1Gi, ephemeral2Gi, workspace1Gi and fixed-DinD caps. The operator subsequently directed **all such limits to be opt-in**. Scheduling requests remain job100m/128Mi/256Mi and daemon100m/128Mi/1Gi; they are independently configurable estimates, not ceilings. Default container limits and volume sizeLimit fields are now absent, including daemon CPU/memory/ephemeral and data/socket caps. Existing settings opt in to limits; new JOB_DIND_SOCKET_SIZE_LIMIT replaces the former fixed1Mi socket cap.
 
-Disk ephemeral requests/limits/workspace caps remain configurable positive bounds: disk pressure/eviction is different from CPU throttling. Keep default256Mi/2Gi/1Gi and workspace<ephemeral limit validation. No new storage subsystem or generic resource language.
+CPU throttling, memory OOM and disk eviction remain different mechanisms, but choosing all three capacity policies belongs to the operator/namespace, not the executor. No artificial default safety budget is imposed. Quantity/request≤limit validation remains when corresponding values exist; workspace headroom compares explicit bounds only, daemon data+socket headroom only when both volume caps and its ephemeral limit exist. Uncapped storage or memory can encounter node pressure; omission is not guaranteed capacity or perfect privileged-daemon accounting. No storage redesign or generic policy language.
 
 Remove explicit **job** IfNotPresent pull policy. There is no executor reason to suppress Kubernetes' normal :latest/untagged Always default. Pinned DinD IfNotPresent remains unchanged. No additional scheduling/DNS/security/lifecycle knobs are justified.
 
@@ -30,8 +30,8 @@ Classes: **1 mechanic**, **2 isolation**, **3 operator policy**, **4 image/workl
 | Env discovery/Exec precedence | 1 | 30s/64KiB NUL probe at Start/every Exec; inherited env → stored daemon defaults → absent-only PATH/HOME fallback → explicit Runner Exec. Empty values reaching wire preserved; Runner's empty/PATH merge limitations remain. No persisted secret cache. |
 | CPU request | 3 | JOB_CPU_REQUEST default100m; `none` omits. Scheduling/contention choice, not a CPU ceiling. |
 | CPU limit | 3 / 7 | JOB_CPU_LIMIT **omitted by default**; positive value opts into throttling; `none` also omits. Former1CPU not required. |
-| Memory request / limit | 3 (limit also2) | JOB_MEMORY_REQUEST/LIMIT default128Mi/1Gi; either accepts `none`. Memory placement/OOM safety, not CPU-style burst policy. |
-| Ephemeral request / limit | 3 (limit also2) | Existing JOB_EPHEMERAL_STORAGE_REQUEST/LIMIT default256Mi/2Gi; positive quantities, request≤limit. Writable layers/logs and volume use affect eviction. |
+| Memory request / limit | 3 | JOB_MEMORY_REQUEST default128Mi; JOB_MEMORY_LIMIT default **omitted**; positive opt-in/`none` omission. Memory policy is the operator's responsibility. |
+| Ephemeral request / limit | 3 | JOB_EPHEMERAL_STORAGE_REQUEST default256Mi; JOB_EPHEMERAL_STORAGE_LIMIT default **omitted**. Positive opt-in/`none`; request≤limit when both exist. |
 | Pod-level resources / resize policy / hugepages / extended resources | 5 | Omitted; no generic field/resource passthrough. |
 | Pod/job runAsUser, runAsGroup, runAsNonRoot | 4 / 5 | Omitted: image-native identity; no fixed UID, non-root enforcement or synthetic NSS records. |
 | Pod supplementalGroups / supplementalGroupsPolicy / fsGroupChangePolicy | 5 | Omitted; runtime image memberships/default handling. No Strict feature assumption. |
@@ -57,21 +57,21 @@ Classes: **1 mechanic**, **2 isolation**, **3 operator policy**, **4 image/workl
 | DNSPolicy/DNSConfig/hostname/subdomain/hostAliases | 5 | Omitted: normal ClusterFirst/name behavior after defaulting. No workflow service aliases. |
 | Job ports/hostPorts / Kubernetes Service | 5 / 2 | Omitted: exec uses Kubernetes API, no job listener publication/host exposure. Plugin's own50051 Service is separate. |
 | enableServiceLinks | 5 | Omitted; normal Kubernetes service env may be discovered. Not an authentication feature. |
-| Workspace volume | 1 / 3 / 2 | One disk-backed emptyDir (medium omitted), default1Gi cap/configurable. Ephemeral per-job, no PVC/host path/persistent cross-job state. |
-| `/shared` and `/workspace` mounts | 1 | Two aliases of one capped volume, not two budgets; Runner staging, Actions/tar paths and existing workdir contract. Default writable mounts; no subPath/bidirectional propagation. |
+| Workspace volume | 1 / 3 / 2 | One disk-backed emptyDir (medium omitted), **no default size cap**, JOB_WORKSPACE_SIZE_LIMIT opt-in. Ephemeral per-job, no PVC/host path/persistent cross-job state. |
+| `/shared` and `/workspace` mounts | 1 | Two aliases of one volume, not two budgets; Runner staging, Actions/tar paths and existing workdir contract. Default writable mounts; no subPath/bidirectional propagation. |
 | Temp paths | 1 / 6 | Runner TempPath/shared tmp staging. Private image /tmp stays private; TMPDIR=/shared/tmp only for DinD shared binds. No tmpfs/dev-shm policy invented. |
 | EmptyDir mode/ACL/preparation | 5 / 4 | No helper/new hardening. Root0777; fsGroup can produce02777 with DinD. Accepted world-write inside private Pod, not host/cross-job sharing. Workload owns its child modes/umask. |
 
-### Fixed DinD inventory (unchanged)
+### Fixed DinD inventory (limits now opt-in; mechanics unchanged)
 
 | Field | Class | Disposition |
 | --- | --- | --- |
 | Operator enabled flag; required digest-pinned image | 3 / 2 / 6 | Default-off JOB_DIND_ENABLED; job requests cannot enable/replace daemon. Existing digest validator retained. |
-| CPU request/limit | 3 / 6 | Existing JOB_DIND_CPU_REQUEST/LIMIT default100m/2; both positive/configurable. Not changed by job CPU omission. |
-| Memory request/limit | 3 / 6 | Existing JOB_DIND_MEMORY_REQUEST/LIMIT128Mi/2Gi. |
-| Ephemeral request/limit | 3 / 2 / 6 | Existing JOB_DIND_EPHEMERAL_STORAGE_REQUEST/LIMIT1Gi/12Gi. |
-| Data emptyDir cap / exact mount | 3 / 2 / 6 | JOB_DIND_DATA_SIZE_LIMIT10Gi; exact /var/lib/docker defeats image VOLUME shadowing. Data+socket cap<daemon ephemeral limit. |
-| Socket emptyDir cap / mounts | 2 / 6 | Fixed1Mi, /run/forgejo-docker in job+daemon, no host socket; finite socket filesystem budget not a traffic-volume limit. No demonstrated need for another setting. |
+| CPU request/limit | 3 | JOB_DIND_CPU_REQUEST default100m; JOB_DIND_CPU_LIMIT **omitted**, operator opt-in. |
+| Memory request/limit | 3 | JOB_DIND_MEMORY_REQUEST default128Mi; JOB_DIND_MEMORY_LIMIT **omitted**, operator opt-in. |
+| Ephemeral request/limit | 3 | JOB_DIND_EPHEMERAL_STORAGE_REQUEST default1Gi; JOB_DIND_EPHEMERAL_STORAGE_LIMIT **omitted**, operator opt-in. |
+| Data emptyDir cap / exact mount | 3 / 6 | JOB_DIND_DATA_SIZE_LIMIT **omitted**, operator opt-in; exact /var/lib/docker still defeats image VOLUME shadowing. |
+| Socket emptyDir cap / mounts | 3 / 6 | New JOB_DIND_SOCKET_SIZE_LIMIT **omitted**, operator opt-in; /run/forgejo-docker in job+daemon unchanged, no host socket. Former1Mi cap was policy, not a socket requirement. |
 | Shared workspace aliases | 1 / 6 | Same volume/mount paths for daemon-visible binds; private /tmp not shared. |
 | Daemon args | 2 / 6 | Unix-only host, group10001, data root/exec root fixed; optional existing default/overlay2/vfs storage driver. No wildcard TCP listener. |
 | Daemon ENTRYPOINT/command/workdir/pull policy | 4 / 6 | Command/workdir omitted, image entrypoint retained; Args configure dockerd; IfNotPresent matches immutable digest's Kubernetes default. |
@@ -86,16 +86,22 @@ All other generated PodSpec/container fields remain unset/zero unless listed. AP
 
 ## Operator resource contract
 
-New **four** settings, instance-wide like existing JOB_* settings, never per-workflow:
+All settings are instance-wide, never per-workflow. The four CPU/memory settings were added in alpha.12; this follow-up makes all other caps optional and adds one socket-size control:
 
 | Setting | Empty/unset | Explicit choice |
 | --- | --- | --- |
 | JOB_CPU_REQUEST |100m| Positive CPU quantity, or exact `none` to omit |
 | JOB_CPU_LIMIT |**omitted**| Positive CPU quantity, or `none` to omit |
 | JOB_MEMORY_REQUEST |128Mi| Positive byte quantity, or `none` to omit |
-| JOB_MEMORY_LIMIT |1Gi| Positive byte quantity, or `none` to omit (operator accepts node-memory risk) |
+| JOB_MEMORY_LIMIT |**omitted**| Positive byte quantity, or `none` to omit |
+| JOB_EPHEMERAL_STORAGE_REQUEST |256Mi| Positive byte quantity, or `none` to omit |
+| JOB_EPHEMERAL_STORAGE_LIMIT |**omitted**| Positive byte quantity, or `none` to omit |
+| JOB_WORKSPACE_SIZE_LIMIT |**omitted**| Positive byte quantity, or `none` to omit |
+| JOB_DIND_CPU_REQUEST / MEMORY_REQUEST / EPHEMERAL_STORAGE_REQUEST |100m / 128Mi / 1Gi| Positive quantity, or `none` to omit |
+| JOB_DIND_CPU_LIMIT / MEMORY_LIMIT / EPHEMERAL_STORAGE_LIMIT |**omitted**| Positive quantity, or `none` to omit |
+| JOB_DIND_DATA_SIZE_LIMIT / SOCKET_SIZE_LIMIT |**omitted**| Positive byte quantity, or `none` to omit |
 
-Requests and limits are independent. Validate quantities/positive values, CPU precision≥1m, and request≤limit **where both exist**. Empty selects defaults; `none` removes the field, not a zero limit. Existing storage values remain positive and bounded; no `none` storage feature added. DinD configuration/positive validation is unchanged. Namespace LimitRange/ResourceQuota/admission can supply defaults or reject omitted limits; when a limit exists with no request, Kubernetes can copy the limit to the request. Inspect admitted Pods, not only plugin output. Parent cgroup limits/cpusets and runtime placement may still constrain bursts. No CPU request or omitted limit promises four available cores.
+Requests and limits are independent. Validate quantities/positive values, CPU precision≥1m, and request≤limit **where both exist**. Empty selects defaults; `none` removes the field, not a zero limit. All resource/storage settings accept `none`; no cap is emitted by default, for jobs or DinD. CPU precision validation now also applies to daemon quantities. Only the operator supplies capacity limits. Namespace LimitRange/ResourceQuota/admission can supply defaults or reject omitted limits; when a limit exists with no request, Kubernetes can copy the limit to the request. Inspect admitted Pods, not only plugin output. Parent cgroup limits/cpusets and runtime placement may still constrain bursts. No CPU request or omitted limit promises four available cores.
 
 Example for a job scheduling estimate without a CPU cap:
 
@@ -121,21 +127,21 @@ These are **job** settings, not the plugin server Deployment or fixed daemon bud
 
 ## Implementation and local validation
 
-Implemented `resources.go` ordinary-job quantity/omission policy and four main.jobConfig bindings; podSpec now uses validated ResourceRequirements and omits job pull policy. No production DinD/transport/cleanup/identity/security changes. Resource maps remain part of deterministic pre-default template hashing.
+Alpha.12 added ordinary-job CPU/memory controls and pull-policy omission. This follow-up uses one shared quantity parser for optional limits, removes remaining job and daemon cap defaults, makes emptyDir size pointers nil when omitted and adds the JOB_DIND_SOCKET_SIZE_LIMIT binding. No transport/cleanup/identity/security mechanics change. Resource maps and volume caps remain in the pre-default template hash.
 
-Tests in `resources_test.go` cover default/custom/none CPU and memory pairs, JSON CPU-limit omission, positive quantities/milliprecision/relationships rejected at startup, resource retry conflicts with/without DinD, equivalent absent policy hashes, independent job/daemon budgets, pull-policy omission for latest/untagged/tag/digest and unchanged daemon policy, plus absence of unnecessary lifecycle/scheduling/DNS/host overrides. Main env tests and existing Pod/identity specs were updated for two default limits instead of three.
+Tests cover default/custom/none values, **absence of all limits/sizeLimit fields in serialized default Pods with DinD off/on**, all explicit cap settings, independent partial cap choices, startup validation, template conflicts for every cap and equivalent none/empty hashes, unchanged image-volume override/security/readiness and independent job/daemon budgets. Main env and existing Pod tests reflect zero default limits/volume caps.
 
-Passed `go test ./...`, `go test -race ./...`, `go vet ./...`, twenty focused race repetitions including resources/liveness/lifecycle/transfers/DinD, existing opt-in local Docker identity/transfer/actual-fixed-dockerd/package suite, formatting/diff, diagnostic syntax and static Linux ARM64 cross-build. Pinned/imported Runner proto hashes still match `961fc5fc541c5c79f5502632d9f6dd3daa110ecfd55b9fbf697778b873367f79`; no go.mod/go.sum/generated/protocol change. Local Docker diagnostics are not the CPU acceptance experiment or proof of target Kubernetes enforcement. The audit was reviewed and prerelease publication explicitly authorized. Local validation does not establish cluster success.
+Passed `go test ./...`, `go test -race ./...`, `go vet ./...`, twenty focused race repetitions including resources/liveness/lifecycle/transfers/DinD, existing opt-in local Docker identity/transfer/actual-fixed-dockerd/package suite, formatting/diff, diagnostic syntax and static Linux ARM64 cross-build. Pinned/imported Runner proto hashes still match `961fc5fc541c5c79f5502632d9f6dd3daa110ecfd55b9fbf697778b873367f79`; no go.mod/go.sum/generated/protocol change. Local Docker diagnostics are not the CPU acceptance experiment or proof of target Kubernetes enforcement. The alpha.13 follow-up was reviewed and publication explicitly authorized. Local validation does not establish cluster success.
 
 ## Breaking changes and separate acceptance
 
-**Alpha.12:** job CPU limit defaults to absent, four CPU/memory controls added, job pull policy now omitted (latest/untagged can pull anew). No AppArmor/DinD/lifecycle/workspace/helper/service redesign. Drain old jobs before deploying: templates change and retries correctly conflict; do not migrate live Pods; deploy only a reviewed immutable release digest after separate deployment authorization.
+**Alpha.13:** job memory/ephemeral/workspace and daemon CPU/memory/ephemeral/data/socket caps now default to absent. Keep existing explicit settings to retain operator-selected limits; remove them or set `none` to delegate to namespace/runtime. Alpha.12's CPU/pull behavior is unchanged. No AppArmor/lifecycle/workspace-layout/helper/service/DinD privilege redesign. Drain old jobs before deploying: templates change and retries correctly conflict; do not migrate live Pods; deploy only a reviewed immutable release digest after separate deployment authorization.
 
 After separately authorized deployment of the reviewed immutable prerelease:
 
-1. Retain accepted job AppArmor, fixed DinD, namespace/storage and job-to-plugin ingress isolation. Leave JOB_CPU_LIMIT unset and start with default requests; check LimitRange/Quota/mutating admission for CPU-limit injection. No application test/worker/Firefox/Vitest changes.
+1. Retain accepted job AppArmor, fixed DinD, namespace/storage and job-to-plugin ingress isolation. Leave JOB_CPU_LIMIT unset and start with default requests; check LimitRange/Quota/mutating admission for any limit injection. Check default serialized/admitted CPU/memory/ephemeral limits and all three emptyDir caps; explicitly configure limits only as operator choices. No application test/worker/Firefox/Vitest changes.
 2. Run **the exact same Vitest workflow** used for alpha.11 on the same four-core node/image/runtime/workload, controlling competing node load, inputs and caches. Capture admitted job resources and image/plugin digests, CPU/memory limits/requests, ancestor cpu.max/cpuset.cpus.effective, Node os.cpus().length and os.availableParallelism(). The ordinary job's cpu.max should no longer show the plugin's100000/100000 ceiling; expected availableParallelism depends on actual affinity/parent constraints.
 3. At comparable workload phases and full duration, sample cpu.stat (delta nr_throttled/nr_periods, throttled_usec), CPU PSI some avg10/60/300 and total delta, wall time/test outcomes; record memory/I/O PSI, memory.current/peak/events and node competition. Compare with supplied alpha.11 baseline37–39% throttled periods, PSI67/58/52%, availableParallelism1. Do not claim improvement merely from an omitted YAML key or different runtime/cache state.
 4. Separately exercise explicit CPU request and a deliberate CPU limit (e.g.1) to verify scheduling/expected throttling, memory override behavior and validation/conflict handling. Node may still report differently on other libuv/runtime versions; record versions, not assumed values.
-5. Confirm Actions/transfers/aliases, root/named/numeric identities, quiet/nonzero/cancel/deadline and explicit cleanup remain; verify existing fixed-DinD readiness/socket/build/cache/publication/capped-data accounting/cleanup independently. No additional privileges, credentials, host namespaces or services.
+5. Confirm Actions/transfers/aliases, root/named/numeric identities, quiet/nonzero/cancel/deadline and explicit cleanup remain; verify existing fixed-DinD readiness/socket/build/cache/publication/exact-data mount/cleanup independently; opt into storage caps for a separate accounting/eviction test. No additional privileges, credentials, host namespaces or services.
 6. Review results before rollout. Publication is not deployment or a real cluster experiment; defaults do not solve node pressure, concurrency policy, missing NSS or full workflow-service support.
