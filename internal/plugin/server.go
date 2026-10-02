@@ -45,6 +45,10 @@ type Config struct {
 	Arch                    string
 	StartupTimeout          time.Duration
 	CleanupTimeout          time.Duration
+	CPURequest              string // Empty defaults to 100m; none omits.
+	CPULimit                string // Empty/none omits; positive quantity opts into a CPU ceiling.
+	MemoryRequest           string // Empty defaults to 128Mi; none omits.
+	MemoryLimit             string // Empty defaults to 1Gi; none delegates bounding to cluster policy.
 	WorkspaceSizeLimit      string // Kubernetes quantities; empty means default.
 	EphemeralStorageRequest string
 	EphemeralStorageLimit   string
@@ -56,7 +60,7 @@ func (c Config) Validate() error {
 	if c.Namespace == "" || c.Image == "" || (c.Arch != "arm64" && c.Arch != "amd64") || c.StartupTimeout <= 0 || c.CleanupTimeout <= 0 {
 		return fmt.Errorf("namespace, image, arm64/amd64 architecture and positive timeouts are required")
 	}
-	if _, _, _, err := c.storageQuantities(); err != nil {
+	if _, _, err := c.jobResources(); err != nil {
 		return err
 	}
 	if _, err := c.appArmorProfile(); err != nil {
@@ -235,7 +239,7 @@ func sameEnvironment(p, expected *core.Pod) bool {
 
 func ptr(s string) *string { return &s }
 func podSpec(id, name, image string, c Config) *core.Pod {
-	workspaceSize, storageRequest, storageLimit, err := c.storageQuantities()
+	resources, workspaceSize, err := c.jobResources()
 	if err != nil {
 		panic(err) // New validates the config before any Pod can be created.
 	}
@@ -249,8 +253,8 @@ func podSpec(id, name, image string, c Config) *core.Pod {
 	p := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: c.Namespace, Labels: map[string]string{"app.kubernetes.io/managed-by": "forgejo-runner-kubernetes", "forgejo.org/execution-id": id}, Annotations: map[string]string{"forgejo.org/runner-name": name}}, Spec: core.PodSpec{
 		RestartPolicy: never, AutomountServiceAccountToken: &no, NodeSelector: map[string]string{"kubernetes.io/arch": c.Arch}, SecurityContext: &core.PodSecurityContext{SeccompProfile: &seccomp},
 		Volumes: []core.Volume{{Name: "workspace", VolumeSource: core.VolumeSource{EmptyDir: &core.EmptyDirVolumeSource{SizeLimit: &workspaceSize}}}},
-		Containers: []core.Container{{Name: "job", Image: image, ImagePullPolicy: core.PullIfNotPresent, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
-			SecurityContext: &core.SecurityContext{AppArmorProfile: appArmor, Privileged: &no, AllowPrivilegeEscalation: &no}, Resources: core.ResourceRequirements{Requests: core.ResourceList{core.ResourceCPU: resource.MustParse("100m"), core.ResourceMemory: resource.MustParse("128Mi"), core.ResourceEphemeralStorage: storageRequest}, Limits: core.ResourceList{core.ResourceCPU: resource.MustParse("1"), core.ResourceMemory: resource.MustParse("1Gi"), core.ResourceEphemeralStorage: storageLimit}}}},
+		Containers: []core.Container{{Name: "job", Image: image, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
+			SecurityContext: &core.SecurityContext{AppArmorProfile: appArmor, Privileged: &no, AllowPrivilegeEscalation: &no}, Resources: resources}},
 	}}
 	if c.DinD.Enabled {
 		// Supplemental group access is required for dockerd's 0660 socket,

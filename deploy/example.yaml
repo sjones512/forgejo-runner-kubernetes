@@ -59,6 +59,13 @@ spec:
             # Optional: omit JOB_APPARMOR_PROFILE to retain the node/runtime default.
             # On affected containerd nodes only, an operator may set it to unconfined.
             # - {name: JOB_APPARMOR_PROFILE, value: unconfined}
+            # Job resource controls added in alpha.12: CPU limit omitted.
+            # CPU request guides scheduling; it is not a ceiling. Empty uses defaults;
+            # exact 'none' omits a CPU/memory field. Job and daemon budgets differ.
+            # - {name: JOB_CPU_REQUEST, value: 100m}
+            # - {name: JOB_CPU_LIMIT, value: '2'} # optional ceiling; normally leave unset
+            # - {name: JOB_MEMORY_REQUEST, value: 128Mi}
+            # - {name: JOB_MEMORY_LIMIT, value: 1Gi}
             # Raise workspace and total ephemeral limits together for larger builds.
             - {name: JOB_WORKSPACE_SIZE_LIMIT, value: 1Gi}
             - {name: JOB_EPHEMERAL_STORAGE_REQUEST, value: 256Mi}

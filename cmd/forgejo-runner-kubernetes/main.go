@@ -33,6 +33,8 @@ func jobConfig() (plugin.Config, error) {
 		Namespace: env("JOB_NAMESPACE", "forgejo-jobs"), Image: env("JOB_IMAGE", "ubuntu:24.04"), Arch: env("JOB_ARCH", "arm64"),
 		StartupTimeout: 3 * time.Minute, CleanupTimeout: 30 * time.Second,
 		WorkspaceSizeLimit: os.Getenv("JOB_WORKSPACE_SIZE_LIMIT"), EphemeralStorageRequest: os.Getenv("JOB_EPHEMERAL_STORAGE_REQUEST"), EphemeralStorageLimit: os.Getenv("JOB_EPHEMERAL_STORAGE_LIMIT"),
+		CPURequest: os.Getenv("JOB_CPU_REQUEST"), CPULimit: os.Getenv("JOB_CPU_LIMIT"),
+		MemoryRequest: os.Getenv("JOB_MEMORY_REQUEST"), MemoryLimit: os.Getenv("JOB_MEMORY_LIMIT"),
 		AppArmorProfile: os.Getenv("JOB_APPARMOR_PROFILE"),
 		DinD: plugin.DinDConfig{
 			Enabled: dindEnabled == "true", Image: os.Getenv("JOB_DIND_IMAGE"),

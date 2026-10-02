@@ -39,8 +39,8 @@ func TestPodSpec(t *testing.T) {
 	if p.Spec.Containers[0].SecurityContext.RunAsUser != nil || p.Spec.Containers[0].SecurityContext.RunAsNonRoot != nil || p.Spec.Containers[0].SecurityContext.Capabilities != nil || p.Spec.SecurityContext.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault {
 		t.Fatal("pod security context")
 	}
-	if len(p.Spec.Containers[0].Resources.Limits) != 3 || len(p.Spec.Containers[0].Resources.Requests) != 3 {
-		t.Fatal("unbounded resources")
+	if len(p.Spec.Containers[0].Resources.Limits) != 2 || len(p.Spec.Containers[0].Resources.Requests) != 3 {
+		t.Fatal("unexpected resource policy")
 	}
 	if p.Spec.Volumes[0].EmptyDir == nil || p.Spec.Volumes[0].EmptyDir.SizeLimit == nil || len(p.Spec.Containers[0].VolumeMounts) != 2 {
 		t.Fatal("workspace not ephemeral")

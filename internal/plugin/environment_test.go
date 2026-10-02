@@ -51,7 +51,7 @@ func TestOrdinaryImageJobPolicy(t *testing.T) {
 				t.Fatal("volume boundary")
 			}
 		}
-		if len(job.Resources.Limits) != 3 || len(job.Resources.Requests) != 3 || len(job.VolumeMounts) != 2+map[bool]int{false: 0, true: 1}[dind] {
+		if len(job.Resources.Limits) != 2 || len(job.Resources.Requests) != 3 || len(job.VolumeMounts) != 2+map[bool]int{false: 0, true: 1}[dind] {
 			t.Fatal("storage/resources/mounts")
 		}
 		if dind {
