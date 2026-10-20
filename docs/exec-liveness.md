@@ -179,14 +179,6 @@ A separate integration agent can establish whether this caused the particular ea
 2. Timestamp of command start, last **raw streamed bytes** (not merely complete visible log lines), failure, and any prior RPC activity/reconnection.
 3. Actual Runner version/build, plugin digest and keepalive/server policy deployed; configured runner/job/step timeouts, and whether a cancellation/restart occurred.
 4. If signatures differ or failures persist: Pod/container state/events (active deadline, eviction, OOM, termination), plugin restart/termination timestamps, API-server/kubelet/CRI exec errors and relevant proxy/transport idle settings.
-5. Deploy the new immutable plugin digest, retaining the existing alpha.9 DinD configuration. Run both existing smoke scripts **directly**, without the output wrapper, preserving exact-image ID checks before and after each smoke. Do not re-prove DinD architecture or change application scripts to emit heartbeats.
+5. Run an ordinary quiet command through the real Runner without an application heartbeat wrapper. The former job-local Docker smoke procedure is obsolete; follow [image-building ownership](oci-building-design.md) for the current remote builder.
 
-The deliberately small real integration shape, executed by the separate agents, is:
-
-```sh
-test "$(docker image inspect --format '{{.Id}}' "$VALIDATION_IMAGE")" = "$VALIDATION_IMAGE_ID"
-node "$SMOKE_SCRIPT" "$VALIDATION_IMAGE" arm64
-test "$(docker image inspect --format '{{.Id}}' "$VALIDATION_IMAGE")" = "$VALIDATION_IMAGE_ID"
-```
-
-Successful direct execution of both existing real smoke suites constitutes real integration validation. The application heartbeat wrapper is not part of the intended model and need not be retained after that succeeds. If `ENHANCE_YOUR_CALM` / `too_many_pings` persists, the correction is not effective in the deployed path: verify the actual digest/configuration. A different failure signature is separate evidence, not grounds to extend this fix speculatively. The local finding justifies this narrow release; the extra logs attribute specific supplied integration failures and confirm the deployed fix, not another plugin timeout. Stop after the immutable release; no integration environment is accessed here.
+Successful quiet execution through the real Runner constitutes integration evidence. The application heartbeat wrapper is not part of the intended model and need not be retained after that succeeds. If `ENHANCE_YOUR_CALM` / `too_many_pings` persists, the correction is not effective in the deployed path: verify the actual digest/configuration. A different failure signature is separate evidence, not grounds to extend this fix speculatively. The local finding justifies this narrow release; the extra logs attribute specific supplied integration failures and confirm the deployed fix, not another plugin timeout. Stop after the immutable release; no integration environment is accessed here.

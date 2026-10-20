@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,16 @@ func (b *boundedEnvBuffer) snapshot() ([]byte, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return bytes.Clone(b.buffer.Bytes()), b.overflow
+}
+
+// Explicit Runner environment overrides inherited image values, including empty values.
+func mergeExecDefaults(env, defaults map[string]string) map[string]string {
+	result := maps.Clone(defaults)
+	if result == nil {
+		result = map[string]string{}
+	}
+	maps.Copy(result, env)
+	return result
 }
 
 func parseImageEnv(data []byte) (map[string]string, error) {
@@ -86,13 +97,10 @@ func (s *Server) executionDefaults(ctx context.Context, p *core.Pod) (map[string
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "job environment discovery failed; image must support /usr/bin/env -0")
 	}
-	inherited, err := parseImageEnv(data)
+	defaults, err := parseImageEnv(data)
 	if err != nil {
 		return nil, err
 	}
-	// Stored plugin endpoint/TMPDIR defaults beat inherited image values;
-	// explicit Runner Exec values win last, including empty values.
-	defaults := mergeExecDefaults(podExecDefaults(p), inherited)
 	if _, present := defaults["PATH"]; !present {
 		defaults["PATH"] = defaultExecPath
 	}

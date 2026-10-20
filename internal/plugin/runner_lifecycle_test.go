@@ -41,7 +41,6 @@ func (s *observedRunnerServer) CopyOut(r *pb.CopyOutRequest, stream grpc.ServerS
 
 func TestRunnerEnvironmentLivesThroughStepFileCommands(t *testing.T) {
 	t.Run("single container", func(t *testing.T) { testRunnerStepLifecycle(t, testConfig()) })
-	t.Run("fixed DinD sidecar", func(t *testing.T) { testRunnerStepLifecycle(t, dindConfig()) })
 }
 
 func testRunnerStepLifecycle(t *testing.T, cfg Config) {
@@ -110,9 +109,6 @@ func testRunnerStepLifecycle(t *testing.T, cfg Config) {
 	}
 	pod.Status.Phase = core.PodRunning
 	pod.Status.ContainerStatuses = []core.ContainerStatus{{Name: "job", Ready: true}}
-	if cfg.DinD.Enabled {
-		pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, core.ContainerStatus{Name: "dind", Ready: true})
-	}
 	if _, err = kube.CoreV1().Pods(cfg.Namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}

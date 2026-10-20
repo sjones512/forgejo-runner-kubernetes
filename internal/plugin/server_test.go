@@ -253,7 +253,10 @@ func TestCreateImageValidationAndRetry(t *testing.T) {
 func TestLifecycleCreateRemove(t *testing.T) {
 	ctx := context.Background()
 	c := testConfig()
-	client := fake.NewSimpleClientset()
+	// Operator infrastructure is outside the disposable job lifecycle.
+	builder := &core.Pod{ObjectMeta: metav1.ObjectMeta{Name: "buildkit", Namespace: "forgejo-runner"}}
+	cache := &core.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "buildkit", Namespace: "forgejo-runner"}}
+	client := fake.NewSimpleClientset(builder, cache)
 	s, err := New(c, client, &rest.Config{Host: "https://example.invalid"})
 	if err != nil {
 		t.Fatal(err)
@@ -283,6 +286,12 @@ func TestLifecycleCreateRemove(t *testing.T) {
 	list, _ = client.CoreV1().Pods(c.Namespace).List(ctx, metav1.ListOptions{})
 	if len(list.Items) != 0 {
 		t.Fatal("pod leaked")
+	}
+	if _, err := client.CoreV1().Pods(builder.Namespace).Get(ctx, builder.Name, metav1.GetOptions{}); err != nil {
+		t.Fatal("cleanup removed operator builder", err)
+	}
+	if _, err := client.CoreV1().PersistentVolumeClaims(cache.Namespace).Get(ctx, cache.Name, metav1.GetOptions{}); err != nil {
+		t.Fatal("cleanup removed persistent cache", err)
 	}
 	if _, err = s.Create(ctx, &pb.CreateRequest{Name: "bad", Image: c.Image, Services: []*pb.ServiceContainer{{Name: "db"}}}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("service should fail closed: %v", err)

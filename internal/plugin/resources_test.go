@@ -3,7 +3,6 @@ package plugin
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -122,67 +121,37 @@ func TestJobResourceInvalidStartup(t *testing.T) {
 }
 
 func TestJobResourceTemplateConflicts(t *testing.T) {
-	for _, dind := range []bool{false, true} {
-		cfg := testConfig()
-		if dind {
-			cfg.DinD = dindConfig().DinD
-		}
-		kube := fake.NewSimpleClientset()
-		s, _ := New(cfg, kube, &rest.Config{})
-		r := &pb.CreateRequest{Name: "resource-retry"}
-		if _, err := s.Create(context.Background(), r); err != nil {
-			t.Fatal(err)
-		}
-		for _, change := range []func(*Config){
-			func(c *Config) { c.CPURequest = "500m" }, func(c *Config) { c.CPULimit = "2" },
-			func(c *Config) { c.MemoryRequest = "512Mi" }, func(c *Config) { c.MemoryLimit = "2Gi" },
-			func(c *Config) { c.CPURequest = "none" }, func(c *Config) { c.EphemeralStorageLimit = "2Gi" },
-			func(c *Config) { c.WorkspaceSizeLimit = "1Gi" },
-		} {
-			other := cfg
-			change(&other)
-			reload, err := New(other, kube, &rest.Config{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := reload.Create(context.Background(), r); status.Code(err) != codes.AlreadyExists {
-				t.Fatal("resource change reused existing Pod", err)
-			}
-		}
-		equivalent := cfg
-		equivalent.CPULimit = "none"
-		equivalent.MemoryLimit = "none"
-		equivalent.EphemeralStorageLimit = "none"
-		equivalent.WorkspaceSizeLimit = "none"
-		reload, _ := New(equivalent, kube, &rest.Config{})
-		if _, err := reload.Create(context.Background(), r); err != nil {
-			t.Fatal("equivalent omission should hash identically", err)
-		}
-	}
-}
-
-func TestJobAndDinDResourceIndependence(t *testing.T) {
-	cfg := dindConfig()
-	before := podSpec(podName("independent"), "independent", cfg.Image, cfg)
-	cfg.CPURequest = "500m"
-	cfg.CPULimit = "3"
-	cfg.MemoryRequest = "512Mi"
-	cfg.MemoryLimit = "4Gi"
-	after := podSpec(before.Name, "independent", cfg.Image, cfg)
-	if !reflect.DeepEqual(before.Spec.Containers[1], after.Spec.Containers[1]) || !reflect.DeepEqual(before.Spec.Volumes, after.Spec.Volumes) || !reflect.DeepEqual(before.Spec.Containers[0].SecurityContext, after.Spec.Containers[0].SecurityContext) {
-		t.Fatal("job policy altered daemon/storage/security")
-	}
-	jobResources := after.Spec.Containers[0].Resources
-	cfg.DinD.CPURequest = "250m"
-	cfg.DinD.CPULimit = "4"
-	cfg.DinD.MemoryRequest = "256Mi"
-	cfg.DinD.MemoryLimit = "3Gi"
-	if err := cfg.Validate(); err != nil {
+	cfg := testConfig()
+	kube := fake.NewSimpleClientset()
+	s, _ := New(cfg, kube, &rest.Config{})
+	r := &pb.CreateRequest{Name: "resource-retry"}
+	if _, err := s.Create(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
-	changed := podSpec(before.Name, "independent", cfg.Image, cfg)
-	if !reflect.DeepEqual(jobResources, changed.Spec.Containers[0].Resources) || reflect.DeepEqual(after.Spec.Containers[1].Resources, changed.Spec.Containers[1].Resources) {
-		t.Fatal("daemon resource controls leaked into job")
+	for _, change := range []func(*Config){
+		func(c *Config) { c.CPURequest = "500m" }, func(c *Config) { c.CPULimit = "2" },
+		func(c *Config) { c.MemoryRequest = "512Mi" }, func(c *Config) { c.MemoryLimit = "2Gi" },
+		func(c *Config) { c.CPURequest = "none" }, func(c *Config) { c.EphemeralStorageLimit = "2Gi" },
+		func(c *Config) { c.WorkspaceSizeLimit = "1Gi" },
+	} {
+		other := cfg
+		change(&other)
+		reload, err := New(other, kube, &rest.Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reload.Create(context.Background(), r); status.Code(err) != codes.AlreadyExists {
+			t.Fatal("resource change reused existing Pod", err)
+		}
+	}
+	equivalent := cfg
+	equivalent.CPULimit = "none"
+	equivalent.MemoryLimit = "none"
+	equivalent.EphemeralStorageLimit = "none"
+	equivalent.WorkspaceSizeLimit = "none"
+	reload, _ := New(equivalent, kube, &rest.Config{})
+	if _, err := reload.Create(context.Background(), r); err != nil {
+		t.Fatal("equivalent omission should hash identically", err)
 	}
 }
 
@@ -197,12 +166,6 @@ func TestJobImagePullPolicyDefaultedByKubernetes(t *testing.T) {
 		if err != nil || strings.Contains(string(data), "imagePullPolicy") {
 			t.Fatal("serialized pull override", err)
 		}
-	}
-	// Fixed daemon remains pinned/unchanged.
-	cfg := dindConfig()
-	p := podSpec(podName("dind-pull"), "dind-pull", cfg.Image, cfg)
-	if p.Spec.Containers[1].ImagePullPolicy != core.PullIfNotPresent {
-		t.Fatal("daemon pull policy changed")
 	}
 }
 

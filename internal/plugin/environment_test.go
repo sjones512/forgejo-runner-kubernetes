@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"os/exec"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	pb "code.forgejo.org/forgejo/runner/v13/act/plugin/proto/v1alpha"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	core "k8s.io/api/core/v1"
@@ -21,46 +21,50 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+type startCapture struct {
+	grpc.ServerStream
+	ctx context.Context
+	out []*pb.StartOutput
+}
+
+func (s *startCapture) Context() context.Context       { return s.ctx }
+func (s *startCapture) Send(out *pb.StartOutput) error { s.out = append(s.out, out); return nil }
+
+type execCapture struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *execCapture) Context() context.Context  { return s.ctx }
+func (s *execCapture) Send(*pb.ExecOutput) error { return nil }
+
 func TestOrdinaryImageJobPolicy(t *testing.T) {
-	for _, dind := range []bool{false, true} {
-		cfg := testConfig()
-		if dind {
-			cfg.DinD = dindConfig().DinD
+	cfg := testConfig()
+	p := podSpec(podName("ordinary"), "ordinary", cfg.Image, cfg)
+	pc, job := p.Spec.SecurityContext, p.Spec.Containers[0]
+	sc := job.SecurityContext
+	if pc.RunAsUser != nil || pc.RunAsGroup != nil || pc.RunAsNonRoot != nil || sc.RunAsUser != nil || sc.RunAsGroup != nil || sc.RunAsNonRoot != nil || sc.Capabilities != nil {
+		t.Fatal("image identity/runtime capabilities overridden")
+	}
+	if sc.Privileged == nil || *sc.Privileged || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation || pc.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault {
+		t.Fatal("job outer security boundary")
+	}
+	if pc.FSGroup != nil {
+		t.Fatal("unnecessary group on ordinary workspace")
+	}
+	if len(p.Spec.InitContainers) != 0 || *p.Spec.AutomountServiceAccountToken || p.Spec.HostNetwork || p.Spec.HostPID || p.Spec.HostIPC || p.Spec.ShareProcessNamespace != nil {
+		t.Fatal("job isolation/init boundary")
+	}
+	for _, v := range p.Spec.Volumes {
+		if v.EmptyDir == nil || v.EmptyDir.SizeLimit != nil || v.HostPath != nil || v.Projected != nil {
+			t.Fatal("volume boundary")
 		}
-		p := podSpec(podName("ordinary"), "ordinary", cfg.Image, cfg)
-		pc, job := p.Spec.SecurityContext, p.Spec.Containers[0]
-		sc := job.SecurityContext
-		if pc.RunAsUser != nil || pc.RunAsGroup != nil || pc.RunAsNonRoot != nil || sc.RunAsUser != nil || sc.RunAsGroup != nil || sc.RunAsNonRoot != nil || sc.Capabilities != nil {
-			t.Fatal("image identity/runtime capabilities overridden")
-		}
-		if sc.Privileged == nil || *sc.Privileged || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation || pc.SeccompProfile.Type != core.SeccompProfileTypeRuntimeDefault {
-			t.Fatal("job outer security boundary")
-		}
-		if dind {
-			if pc.FSGroup == nil || *pc.FSGroup != 10001 {
-				t.Fatal("socket group missing")
-			}
-		} else if pc.FSGroup != nil {
-			t.Fatal("unnecessary group on ordinary workspace")
-		}
-		if len(p.Spec.InitContainers) != 0 || *p.Spec.AutomountServiceAccountToken || p.Spec.HostNetwork || p.Spec.HostPID || p.Spec.HostIPC || p.Spec.ShareProcessNamespace != nil {
-			t.Fatal("job isolation/init boundary")
-		}
-		for _, v := range p.Spec.Volumes {
-			if v.EmptyDir == nil || v.EmptyDir.SizeLimit != nil || v.HostPath != nil || v.Projected != nil {
-				t.Fatal("volume boundary")
-			}
-		}
-		if len(job.Resources.Limits) != 0 || len(job.Resources.Requests) != 3 || len(job.VolumeMounts) != 2+map[bool]int{false: 0, true: 1}[dind] {
-			t.Fatal("storage/resources/mounts")
-		}
-		if dind {
-			expected := &core.Pod{Spec: core.PodSpec{Containers: []core.Container{{Name: "job"}}}}
-			cfg.DinD.addToPod(expected)
-			if !reflect.DeepEqual(p.Spec.Containers[1], expected.Spec.Containers[1]) {
-				t.Fatal("fixed daemon changed")
-			}
-		}
+	}
+	if len(job.Resources.Limits) != 0 || len(job.Resources.Requests) != 3 || len(job.VolumeMounts) != 2 {
+		t.Fatal("storage/resources/mounts")
+	}
+	if len(p.Spec.Containers) != 1 || len(p.Spec.Volumes) != 1 || p.Spec.Volumes[0].Name != "workspace" || len(job.Env) != 0 {
+		t.Fatal("executor must provision only the disposable job and workspace")
 	}
 }
 
@@ -80,7 +84,6 @@ func TestJobTemplateRetryAndServicesRejected(t *testing.T) {
 	for _, change := range []func(*Config){
 		func(c *Config) { c.AppArmorProfile = "unconfined" },
 		func(c *Config) { c.WorkspaceSizeLimit = "512Mi" },
-		func(c *Config) { c.DinD = dindConfig().DinD },
 	} {
 		other := cfg
 		change(&other)
@@ -107,9 +110,8 @@ func TestJobTemplateRetryAndServicesRejected(t *testing.T) {
 
 func TestImageEnvironmentPrecedenceAndRestart(t *testing.T) {
 	for _, home := range []string{"/home/node", ""} {
-		cfg := dindConfig()
+		cfg := testConfig()
 		p := podSpec(podName("env"), "env", cfg.Image, cfg)
-		// A different current config cannot remove stored daemon defaults.
 		s, _ := New(testConfig(), fake.NewSimpleClientset(p), &rest.Config{})
 		calls := 0
 		s.execFn = func(_ context.Context, _ string, args []string, _ io.Reader, out, _ io.Writer) error {
@@ -117,7 +119,7 @@ func TestImageEnvironmentPrecedenceAndRestart(t *testing.T) {
 				t.Fatal("shell/application discovery", args)
 			}
 			calls++
-			_, err := io.WriteString(out, "HOME="+home+"\x00PATH=/image/bin\x00IMAGE_ONLY=one=two\nthree\x00INPUT_A-B=image\x00EMPTY=\x00DOCKER_HOST=wrong\x00TMPDIR=wrong\x00")
+			_, err := io.WriteString(out, "HOME="+home+"\x00PATH=/image/bin\x00IMAGE_ONLY=one=two\nthree\x00INPUT_A-B=image\x00EMPTY=\x00BUILDKIT_HOST=tcp://builder:1234\x00")
 			return err
 		}
 		for range 2 {
@@ -125,7 +127,7 @@ func TestImageEnvironmentPrecedenceAndRestart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if defaults["HOME"] != home || defaults["PATH"] != "/image/bin" || defaults["DOCKER_HOST"] != dockerHost || defaults["TMPDIR"] != "/shared/tmp" || defaults["IMAGE_ONLY"] != "one=two\nthree" {
+			if defaults["HOME"] != home || defaults["PATH"] != "/image/bin" || defaults["BUILDKIT_HOST"] != "tcp://builder:1234" || defaults["IMAGE_ONLY"] != "one=two\nthree" {
 				t.Fatal("defaults lost")
 			}
 			r := &pb.ExecRequest{Command: []string{"/usr/bin/env", "-0"}, Workdir: "/workspace", Env: map[string]string{"HOME": "", "PATH": "/runner/bin", "INPUT_A-B": "runner", "EMPTY": ""}}

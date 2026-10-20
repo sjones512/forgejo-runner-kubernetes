@@ -46,7 +46,6 @@ type Config struct {
 	EphemeralStorageRequest string // Empty defaults to 256Mi; none omits.
 	EphemeralStorageLimit   string // Empty/none omits.
 	AppArmorProfile         string // Empty leaves AppArmor unspecified; otherwise runtime-default, unconfined or localhost:<name>.
-	DinD                    DinDConfig
 }
 
 func (c Config) Validate() error {
@@ -59,7 +58,7 @@ func (c Config) Validate() error {
 	if _, err := c.appArmorProfile(); err != nil {
 		return err
 	}
-	return c.DinD.validate()
+	return nil
 }
 
 // Use the container-level API field: it applies only to the job container
@@ -181,7 +180,7 @@ func (s *Server) Create(ctx context.Context, r *pb.CreateRequest) (*pb.CreateRes
 func sameEnvironment(p, expected *core.Pod) bool {
 	if p.Annotations["forgejo.org/runner-name"] != expected.Annotations["forgejo.org/runner-name"] ||
 		p.Annotations[jobTemplate] == "" || p.Annotations[jobTemplate] != expected.Annotations[jobTemplate] ||
-		p.Annotations[dindTemplate] != expected.Annotations[dindTemplate] || len(p.Spec.Containers) != len(expected.Spec.Containers) || len(p.Spec.InitContainers) != len(expected.Spec.InitContainers) {
+		len(p.Spec.Containers) != len(expected.Spec.Containers) || len(p.Spec.InitContainers) != len(expected.Spec.InitContainers) {
 		return false
 	}
 	for i, c := range expected.Spec.InitContainers {
@@ -216,13 +215,6 @@ func podSpec(id, name, image string, c Config) *core.Pod {
 		Containers: []core.Container{{Name: "job", Image: image, Command: []string{"/bin/sh", "-c", "mkdir -p /shared/act /shared/toolcache /shared/workdir /shared/tmp && exec sleep infinity"}, VolumeMounts: []core.VolumeMount{{Name: "workspace", MountPath: workspace}, {Name: "workspace", MountPath: "/workspace"}},
 			SecurityContext: &core.SecurityContext{AppArmorProfile: appArmor, Privileged: &no, AllowPrivilegeEscalation: &no}, Resources: resources}},
 	}}
-	if c.DinD.Enabled {
-		// Supplemental group access is required for dockerd's 0660 socket,
-		// independent of the job image's primary GID. Ordinary emptyDir
-		// workspace access needs no forced group or identity.
-		p.Spec.SecurityContext.FSGroup = ptrInt64(10001)
-		c.DinD.addToPod(p)
-	}
 	// Pin the intended Pod template before API defaulting and the Runner's
 	// remaining lifetime. Refuse incompatible environments on Create retries.
 	encoded, err := json.Marshal(p.Spec)
@@ -231,13 +223,8 @@ func podSpec(id, name, image string, c Config) *core.Pod {
 	}
 	sum := sha256.Sum256(encoded)
 	p.Annotations[jobTemplate] = hex.EncodeToString(sum[:])
-	if c.DinD.Enabled {
-		p.Annotations[dindTemplate] = p.Annotations[jobTemplate]
-	}
 	return p
 }
-func ptrBool(v bool) *bool    { return &v }
-func ptrInt64(v int64) *int64 { return &v }
 func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.StartOutput]) error {
 	id := r.GetEnvironmentId()
 	if err := s.checkID(id); err != nil {
@@ -247,7 +234,6 @@ func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.
 	defer unlock()
 	ctx, cancel := context.WithTimeout(stream.Context(), s.cfg.StartupTimeout)
 	defer cancel()
-	waiting := "job readiness"
 	err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
 		p, err := s.get(ctx, id)
 		if err != nil {
@@ -256,7 +242,7 @@ func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.
 		if p.Status.Phase == core.PodFailed || p.Status.Phase == core.PodSucceeded {
 			return false, status.Errorf(codes.FailedPrecondition, "pod terminated: %s", p.Status.Message)
 		}
-		jobReady, daemonReady := false, false
+		jobReady := false
 		for _, cs := range p.Status.ContainerStatuses {
 			if cs.State.Terminated != nil {
 				return false, status.Errorf(codes.FailedPrecondition, "%s container terminated: %s (exit %d): %s", cs.Name, cs.State.Terminated.Reason, cs.State.Terminated.ExitCode, cs.State.Terminated.Message)
@@ -270,16 +256,9 @@ func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.
 			if cs.Name == "job" {
 				jobReady = cs.Ready
 			}
-			if cs.Name == "dind" {
-				daemonReady = cs.Ready // kubelet's Docker API exec probe, not just Running.
-			}
 		}
-		if jobReady && (!podHasDinD(p) || daemonReady) {
+		if jobReady {
 			return true, nil
-		}
-		waiting = "job readiness"
-		if podHasDinD(p) && !daemonReady {
-			waiting = "dind Docker API readiness (docker info probe); inspect dind container logs"
 		}
 		for _, cond := range p.Status.Conditions {
 			if cond.Type == core.PodScheduled && cond.Status == core.ConditionFalse && cond.Reason == "Unschedulable" {
@@ -293,7 +272,7 @@ func (s *Server) Start(r *pb.StartRequest, stream grpc.ServerStreamingServer[pb.
 			return stream.Context().Err()
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return status.Errorf(codes.DeadlineExceeded, "pod startup timed out waiting for %s", waiting)
+			return status.Error(codes.DeadlineExceeded, "pod startup timed out waiting for job readiness")
 		}
 		return err
 	}
